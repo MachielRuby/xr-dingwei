@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+  <title>XR SLAM 空间定位</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; font-family: sans-serif; }
+
+    /* inset:0 = top/right/bottom/left 全部为 0，完全撑满固定视口，不受 100vh 移动端地址栏问题影响 */
+    canvas { position: fixed; inset: 0; width: 100% !important; height: 100% !important; z-index: 0; }
+    video { display: none !important; }
+
+    #status {
+      position: fixed; bottom: 36px; left: 50%; transform: translateX(-50%);
+      background: rgba(0,0,0,0.72); color: #fff;
+      padding: 10px 20px; border-radius: 20px;
+      font-size: 15px; pointer-events: none; z-index: 10;
+      white-space: nowrap;
+    }
+    #tap-hint {
+      position: fixed; bottom: 90px; left: 50%; transform: translateX(-50%);
+      color: rgba(255,255,255,0.85); font-size: 13px;
+      pointer-events: none; z-index: 10;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <!-- canvas 直接写在 HTML 里，避免 XR8 重复创建导致双 canvas 布局错乱 -->
+  <canvas id="camerafeed"></canvas>
+  <div id="status">正在初始化相机...</div>
+  <div id="tap-hint">点击屏幕在地面放置立方体</div>
+
+  <!--
+    8th Wall 核心库 + SLAM 扩展
+    官方替代 CDN: https://cdn.8thwall.com/web/xrweb/xrweb.js
+  -->
+  <script src="https://static.fczsyx.com/script/webar/xr.js"></script>
+
+  <!-- Three.js r128（与 8th Wall 官方示例版本一致） -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+
+  <script>
+    /* ─────────────────────────────────────────
+       全局 Three.js 对象
+    ───────────────────────────────────────── */
+    let scene, camera, renderer, reticle, reticleVisible = false;
+
+    const statusEl  = document.getElementById('status');
+    const tapHintEl = document.getElementById('tap-hint');
+
+    /* ─────────────────────────────────────────
+       初始化 Three.js 场景（在 onStart 中调用）
+    ───────────────────────────────────────── */
+    function initThree(canvas) {
+      scene = new THREE.Scene();
+
+      // 透视相机：FOV 由 8th Wall 的 intrinsics 矩阵覆盖，初始值不影响最终效果
+      camera = new THREE.PerspectiveCamera(
+        60, window.innerWidth / window.innerHeight, 0.01, 1000
+      );
+
+      renderer = new THREE.WebGLRenderer({
+        canvas,
+        alpha: true,          // 背景透明，让相机画面透出
+        antialias: true,
+        preserveDrawingBuffer: true,
+      });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.autoClear = false; // 手动控制清除，避免清掉相机纹理
+
+      // 环境光 + 方向光（产生立体感阴影）
+      scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+      const dir = new THREE.DirectionalLight(0xffffff, 0.9);
+      dir.position.set(1, 3, 2);
+      scene.add(dir);
+
+      // ── 瞄准环 Reticle ──────────────────────
+      // 用于实时显示 hitTest 命中的地面位置
+      const ringGeo = new THREE.RingGeometry(0.06, 0.08, 36);
+      // RingGeometry 默认在 XY 平面，需旋转到 XZ（水平地面）
+      ringGeo.applyMatrix4(new THREE.Matrix4().makeRotationX(-Math.PI / 2));
+      const ringMat = new THREE.MeshBasicMaterial({
+        color: 0x00e6c8,
+        side: THREE.DoubleSide,
+        depthTest: false,   // 始终显示在最上层
+        transparent: true,
+        opacity: 0.9,
+      });
+      reticle = new THREE.Mesh(ringGeo, ringMat);
+      reticle.visible = false;
+      scene.add(reticle);
+    }
+
+    /* ─────────────────────────────────────────
+       在地面坐标处放置一个旋转立方体
+    ───────────────────────────────────────── */
+    function placeCube(position, quaternion) {
+      const geo = new THREE.BoxGeometry(0.18, 0.18, 0.18);
+      const mat = new THREE.MeshPhongMaterial({
+        color: 0x00e6c8,
+        emissive: 0x003333,
+        shininess: 100,
+        specular: 0x88ffee,
+      });
+      const cube = new THREE.Mesh(geo, mat);
+
+      // 根据平面法线对齐，再上移半个边长让立方体站在地面上
+      if (quaternion) {
+        cube.quaternion.set(quaternion.x, quaternion.y, quaternion.z, quaternion.w);
+      }
+      cube.position.set(position.x, position.y + 0.09, position.z);
+      cube.userData.isPlaced = true; // 用于动画循环识别
+      scene.add(cube);
+    }
+
+    /* ─────────────────────────────────────────
+       8th Wall Camera Pipeline Module
+       文档: https://www.8thwall.com/docs/web/#camera-pipeline
+    ───────────────────────────────────────── */
+    const slamDemoModule = {
+      name: 'slam-demo',
+
+      // ① 引擎启动，canvas 已就绪
+      onStart: ({ canvas }) => {
+        initThree(canvas);
+        statusEl.textContent = '📡 请慢慢移动手机扫描地面...';
+        console.log('✅ SLAM pipeline 启动');
+      },
+
+      // ② 每帧更新：同步相机姿态
+      onUpdate: ({ processCpuResult }) => {
+        const reality = processCpuResult?.reality;
+        if (!reality) return;
+
+        const { rotation, position, intrinsics } = reality;
+
+        // 将 8th Wall 提供的投影矩阵直接写入 Three.js 相机
+        if (intrinsics) {
+          for (let i = 0; i < 16; i++) {
+            camera.projectionMatrix.elements[i] = intrinsics[i];
+          }
+          camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
+        }
+
+        if (rotation) {
+          camera.quaternion.set(rotation.x, rotation.y, rotation.z, rotation.w);
+        }
+        if (position) {
+          camera.position.set(position.x, position.y, position.z);
+        }
+
+        // 实时 hitTest，更新瞄准环位置
+        const cx = 0.5, cy = 0.5; // 屏幕中心
+        const hits = XR8.XrController.hitTest(cx, cy, [
+          'FEATURE_POINT',
+          'ESTIMATED_SURFACE',
+        ]);
+
+        if (hits && hits.length > 0) {
+          const p = hits[0].position;
+          const q = hits[0].rotation;
+          reticle.position.set(p.x, p.y, p.z);
+          if (q) reticle.quaternion.set(q.x, q.y, q.z, q.w);
+          reticle.visible = true;
+          reticleVisible = true;
+          tapHintEl.style.display = 'block';
+          statusEl.textContent = '✋ 检测到地面，点击放置立方体';
+        } else {
+          reticle.visible = false;
+          reticleVisible = false;
+          tapHintEl.style.display = 'none';
+        }
+      },
+
+      // ③ 渲染：在相机纹理之上渲染 Three.js 场景
+      onRender: () => {
+        // 只清深度缓冲区，相机背景已由 GlTextureRenderer 写入颜色缓冲
+        renderer.clearDepth();
+        // 自转动画
+        scene.children.forEach(obj => {
+          if (obj.userData.isPlaced) obj.rotation.y += 0.012;
+        });
+        renderer.render(scene, camera);
+      },
+
+      // ④ 窗口/canvas 尺寸变化
+      onCanvasSizeChange: ({ canvasWidth, canvasHeight }) => {
+        if (!renderer) return;
+        camera.aspect = canvasWidth / canvasHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(canvasWidth, canvasHeight);
+      },
+
+      onException: (err) => {
+        console.error('XR 错误:', err);
+        statusEl.textContent = '❌ AR 初始化失败，请检查相机权限';
+      },
+    };
+
+    /* ─────────────────────────────────────────
+       触摸放置
+    ───────────────────────────────────────── */
+    window.addEventListener('touchstart', (e) => {
+      if (!scene || !reticleVisible) return;
+      e.preventDefault();
+
+      const touch = e.touches[0];
+      const relX  = touch.clientX / window.innerWidth;
+      const relY  = touch.clientY / window.innerHeight;
+
+      // XR8.XrController.hitTest 返回命中平面数组
+      const hits = XR8.XrController.hitTest(relX, relY, [
+        'FEATURE_POINT',
+        'ESTIMATED_SURFACE',
+      ]);
+
+      if (hits && hits.length > 0) {
+        placeCube(hits[0].position, hits[0].rotation);
+        statusEl.textContent = '✅ 已放置！继续点击放置更多';
+      } else {
+        statusEl.textContent = '🔍 未命中地面，请对准地面后点击';
+      }
+    }, { passive: false });
+
+    /* ─────────────────────────────────────────
+       注册 Pipeline 模块并启动
+       顺序很重要：
+         1. GlTextureRenderer — 渲染相机背景到 WebGL
+         2. 自定义 slamDemoModule — 在背景上层渲染 Three.js
+    ───────────────────────────────────────── */
+    const canvas = document.getElementById('camerafeed');
+
+    XR8.addCameraPipelineModule(XR8.GlTextureRenderer.pipelineModule());
+    XR8.addCameraPipelineModule(slamDemoModule);
+    XR8.run({ canvas });
+  </script>
+</body>
+</html>
