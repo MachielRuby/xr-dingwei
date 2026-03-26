@@ -37,19 +37,11 @@ function loadModel() {
     '/01.glb',
     (gltf) => {
       glbTemplate = gltf.scene;
-      // 计算模型的包围盒来自动缩放到合理尺寸
+      // 不缩放，保持原始尺寸，只做底部对齐
       const box = new THREE.Box3().setFromObject(glbTemplate);
       const size = box.getSize(new THREE.Vector3());
-      const maxDim = Math.max(size.x, size.y, size.z);
-      // 缩放到约 0.3m 高
-      if (maxDim > 0) {
-        const scale = 0.3 / maxDim;
-        glbTemplate.scale.setScalar(scale);
-      }
-      // 让模型底部对齐 y=0
-      const boxScaled = new THREE.Box3().setFromObject(glbTemplate);
-      glbTemplate.position.y = -boxScaled.min.y;
-      console.log('[MODEL] 01.glb loaded, size:', size, 'scale:', glbTemplate.scale.x);
+      glbTemplate.position.y = -box.min.y; // 底面贴地
+      console.log('[MODEL] 01.glb loaded, original size:', size.x.toFixed(3), size.y.toFixed(3), size.z.toFixed(3));
     },
     undefined,
     (err) => console.error('[MODEL] Failed to load 01.glb:', err)
@@ -77,8 +69,8 @@ function initThree(canvas, glContext, w, h) {
   sun.position.set(2, 5, 3);
   scene.add(sun);
 
-  // 瞄准环 (水平躺在地面上)
-  const ringGeo = new THREE.RingGeometry(0.08, 0.12, 48);
+  // 瞄准环（单位半径1，每帧根据相机距离动态缩放保持屏幕大小恒定）
+  const ringGeo = new THREE.RingGeometry(0.8, 1.2, 48);
   ringGeo.applyMatrix4(new THREE.Matrix4().makeRotationX(-Math.PI / 2));
   reticle = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({
     color: 0x00e6c8, side: THREE.DoubleSide,
@@ -86,6 +78,7 @@ function initThree(canvas, glContext, w, h) {
   }));
   reticle.visible = false;
   reticle.renderOrder = 999;
+  reticle.frustumCulled = false;
   scene.add(reticle);
 
   // 开始加载 GLB 模型
@@ -229,8 +222,14 @@ const onXRLoad = async () => {
             _retQuat.slerp(new THREE.Quaternion(q.x, q.y, q.z, q.w), t);
             reticle.quaternion.copy(_retQuat);
           }
+
+          // 根据与相机距离动态缩放，保持屏幕占圆大小恒定
+          const dist = camera.position.distanceTo(_retPos);
+          const s = Math.max(0.01, dist * 0.06); // 屏幕半径约占 6% 视角
+          reticle.scale.setScalar(s);
+
           _retReady = true;
-          tipEl.textContent = '点击屏幕放置模型';
+          tipEl.textContent = '✓ 点击放置模型';
         } else {
           tipEl.textContent = reality.trackingStatus === 'NORMAL'
             ? '对准平面...'
