@@ -9,37 +9,25 @@
       html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
 
       #xr-canvas {
-        /* 移除 object-fit，让 8th Wall 内部引擎自己控制宽高比，避免和 CSS 产生放大冲突 */
-        position: fixed; inset: 0;
-        width: 100vw; height: 100vh;
-        z-index: 0;
+        position: fixed; top: 0; left: 0;
+        width: 100%; height: 100%;
         display: block;
-      }
-      #three-canvas {
-        position: fixed; inset: 0;
-        width: 100% !important; height: 100% !important;
-        z-index: 1; pointer-events: none;
+        z-index: 0;
       }
       video { display: none !important; }
 
-      /* 扫描提示条 */
       #tip {
         position: fixed; bottom: 36px; left: 50%; transform: translateX(-50%);
         background: rgba(0,0,0,.65); color: #fff;
         padding: 9px 22px; border-radius: 24px; font-size: 14px;
         pointer-events: none; z-index: 9; white-space: nowrap;
-        letter-spacing: .5px;
       }
-
-      /* 已放置数量角标 */
       #count {
         position: fixed; top: 18px; right: 18px;
         background: rgba(0,0,0,.55); color: #00e6c8;
         padding: 6px 14px; border-radius: 16px; font-size: 13px;
         pointer-events: none; z-index: 9;
       }
-
-      /* 初始化 Loading 遮罩 */
       #loading {
         position: fixed; inset: 0; z-index: 99;
         background: #000; display: flex; flex-direction: column;
@@ -58,39 +46,12 @@
     </style>
   </head>
   <body>
-    <!-- AR 渲染层 -->
     <canvas id="xr-canvas"></canvas>
-    <canvas id="three-canvas"></canvas>
 
-    <!-- UI 层 -->
-    <div id="loading">
-      <div class="spinner"></div>
-      <span>正在初始化摄像头...</span>
-    </div>
+    <div id="loading"><div class="spinner"></div><span>正在初始化摄像头...</span></div>
     <div id="tip">移动手机扫描地面...</div>
     <div id="count">已放置：0</div>
 
-    <!--
-      加载顺序必须严格保证：
-      1. xr.js      —— 8th Wall 核心运行时（挂载 XR8 全局对象）
-      2. xr-slam.js —— SLAM 六自由度跟踪模块（依赖 XR8 已存在）
-      3. three.js   —— 3D 渲染引擎
-      4. main.js    —— 业务逻辑（type=module 确保在前三者之后执行）
-    -->
-    <!--
-      加载顺序：
-      1. xr.js      —— 8th Wall 核心运行时，内含 SLAM / XrController，挂载 window.XR8
-      2. three.js   —— 3D 渲染引擎，挂载 window.THREE
-      3. main.js    —— 业务逻辑（type=module 保证在上面两个同步脚本之后执行）
-
-      注意：xr-slam.js 无需单独加载，SLAM 能力已内置于 xr.js 的 XR8.XrController 中。
-      加载它反而会因跨域 CORS 导致 403。
-    -->
-    <!-- 
-      修改加载顺序并移除 xr-slam.js：
-      8th Wall standalone 版本中，XR8 很多时候已经通过 xr.js 集成了模块。
-      有些打包版本中 xr-slam.js 是 ES Module 格式或作为 Worker 引用，不应该使用 <script src> 标签直接引入
-    -->
     <script src="/xr-standalone/xr.js"></script>
     <script src="/three.min.js"></script>
     <script type="module" src="/src/main.js"></script>
