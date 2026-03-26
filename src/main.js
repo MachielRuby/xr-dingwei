@@ -119,17 +119,17 @@ function placeModel(pos, rot) {
   console.log('[PLACE]', pos);
 }
 
-// ─── 触摸/点击放置 ───────────────────────────────────────────────────────────
-function tryPlace(clientX, clientY) {
-  if (!canPlace || !XR8.XrController || !XR8.XrController.hitTest) return;
-  const rect = xrCanvas.getBoundingClientRect();
-  const nx = (clientX - rect.left) / rect.width;
-  const ny = (clientY - rect.top) / rect.height;
-  if (nx < 0 || nx > 1 || ny < 0 || ny > 1) return;
-  const hits = XR8.XrController.hitTest(nx, ny, ['ESTIMATED_SURFACE']);
-  if (hits && hits.length) {
-    placeModel(hits[0].position, hits[0].rotation);
+// ─── 触摸/点击放置（直接用瞄准环坐标，不重新做 hitTest）────────────────────
+function tryPlace() {
+  if (!canPlace || !_retReady) {
+    console.log('[PLACE] skip: canPlace=', canPlace, '_retReady=', _retReady);
+    return;
   }
+  // 直接取瞄准环的世界坐标放置，点击/触摸任意位置都有效
+  placeModel(
+    { x: _retPos.x, y: _retPos.y, z: _retPos.z },
+    { x: _retQuat.x, y: _retQuat.y, z: _retQuat.z, w: _retQuat.w }
+  );
 }
 
 // ─── 等待 XR8 就绪 ───────────────────────────────────────────────────────────
@@ -258,13 +258,11 @@ const onXRLoad = async () => {
   // 触摸放置
   window.addEventListener('touchstart', (e) => {
     e.preventDefault();
-    tryPlace(e.touches[0].clientX, e.touches[0].clientY);
+    tryPlace();
   }, { passive: false });
 
-  // 鼠标放置
-  window.addEventListener('click', (e) => {
-    tryPlace(e.clientX, e.clientY);
-  });
+  // 鼠标放置（调试用）
+  window.addEventListener('click', () => tryPlace());
 
   // ═══ 设置 canvas 缓冲区尺寸 ═══
   function resizeCanvas() {
