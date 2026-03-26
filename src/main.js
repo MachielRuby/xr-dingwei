@@ -80,22 +80,30 @@ function onTouch(e) {
   if (!canPlace) return;
   e.preventDefault();
   const t = e.touches[0];
+  // 用 xr-canvas 的实际显示尺寸换算归一化坐标，避免 object-fit:cover 偏移
+  const rect = xrCanvas.getBoundingClientRect();
+  const nx = (t.clientX - rect.left) / rect.width;
+  const ny = (t.clientY - rect.top)  / rect.height;
   const hits = XR8.XrController.hitTest(
-    t.clientX / window.innerWidth,
-    t.clientY / window.innerHeight,
+    Math.max(0, Math.min(1, nx)),
+    Math.max(0, Math.min(1, ny)),
     ['ESTIMATED_SURFACE', 'FEATURE_POINT']
   );
   if (hits && hits.length) placeAnchoredModel(hits[0].position, hits[0].rotation);
 }
 
-// ─── 启动入口：等 window.load 确保 xr.js 已同步执行完毕 ──────────────────────
-window.addEventListener('load', () => {
-  // 验证依赖是否存在
-  if (typeof XR8 === 'undefined') {
-    loadingEl.querySelector('span').textContent = '⚠️ AR 引擎加载失败，请用 HTTPS 访问';
-    console.error('[XR] XR8 未定义。可能原因：\n  1. 页面未走 HTTPS（AR 摄像头权限要求 HTTPS）\n  2. CDN 已阻止当前域名访问');
-    return;
-  }
+// ─── 启动入口：监听 xrloaded 事件（XR8 官方就绪信号）────────────────────────
+// xr.js 异步初始化完成后会 dispatch 'xrloaded'，此时 window.XR8 才真正可用。
+// 不能用 window.load，load 可能比 XR8 初始化更早触发。
+const XR_TIMEOUT = 10000; // 10s 超时兜底
+
+const xrTimer = setTimeout(() => {
+  loadingEl.querySelector('span').textContent = '⚠️ AR 引擎加载超时，请检查网络或 HTTPS';
+  console.error('[XR] xrloaded 事件 10s 内未触发。可能原因：\n  1. 页面未走 HTTPS\n  2. CDN 被屏蔽或网络异常');
+}, XR_TIMEOUT);
+
+window.addEventListener('xrloaded', () => {
+  clearTimeout(xrTimer);
   THREE = window.THREE;
 
   // ─── XR8 SLAM 管线 ──────────────────────────────────────────────────────────
@@ -158,5 +166,23 @@ window.addEventListener('load', () => {
 
   window.addEventListener('touchstart', onTouch, { passive: false });
 
-  XR8.run({ canvas: xrCanvas });
+  // 桌面浏览器用鼠标点击测试（手机上 touchstart 优先，click 不会重复触发）
+  window.addEventListener('click', e => {
+    if (!canPlace) return;
+    const rect = xrCanvas.getBoundingClientRect();
+    const nx = (e.clientX - rect.left) / rect.width;
+    const ny = (e.clientY - rect.top)  / rect.height;
+    const hits = XR8.XrController.hitTest(
+      Math.max(0, Math.min(1, nx)),
+      Math.max(0, Math.min(1, ny)),
+      ['ESTIMATED_SURFACE', 'FEATURE_POINT']
+    );
+    if (hits && hits.length) placeAnchoredModel(hits[0].position, hits[0].rotation);
+  });
+
+  XR8.run({
+    canvas: xrCanvas,
+    // 让 XR8 自动把 canvas 尺寸设为屏幕全分辨率
+    webgl2: true,
+  });
 });
