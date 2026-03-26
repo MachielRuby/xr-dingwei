@@ -19,6 +19,7 @@ const MODEL_SCALE = 1.0;
 
 let scene, camera, renderer, reticle;
 let canPlace   = false;
+let hasPlaced  = false;   // ★ 只允许放置一次
 let placeCount = 0;
 let hasLoggedReality = false;
 let glbTemplate = null;
@@ -151,15 +152,24 @@ function placeModel(pos, rot) {
 
 // ─── 触摸/点击放置（直接用瞄准环坐标，不重新做 hitTest）────────────────────
 function tryPlace() {
-  if (!canPlace || !_retReady) {
-    console.log('[PLACE] skip: canPlace=', canPlace, '_retReady=', _retReady);
+  if (hasPlaced || !canPlace || !_retReady) {
+    console.log('[PLACE] skip: hasPlaced=', hasPlaced, 'canPlace=', canPlace, '_retReady=', _retReady);
     return;
   }
-  // 直接取瞄准环的世界坐标放置，点击/触摸任意位置都有效
+  hasPlaced = true;  // ★ 立即锁定，禁止再次放置
+
+  // 直接取瞄准环的世界坐标放置
   placeModel(
     { x: _retPos.x, y: _retPos.y, z: _retPos.z },
     { x: _retQuat.x, y: _retQuat.y, z: _retQuat.z, w: _retQuat.w }
   );
+
+  // 放置后：隐藏瞄准环、更新提示
+  reticle.visible = false;
+  canPlace = false;
+  tipEl.textContent = '✓ 模型已锚定';
+  countEl.style.display = 'none';
+  console.log('[PLACE] Model anchored at', _retPos);
 }
 
 // ─── 等待 XR8 就绪 ───────────────────────────────────────────────────────────
@@ -239,7 +249,9 @@ const onXRLoad = async () => {
       camera.updateMatrix();
       camera.updateMatrixWorld(true);
 
-      // ─── 瞄准环 hitTest（不再门控 trackingStatus，直接尝试）───
+      // ─── 瞄准环 hitTest（已放置后跳过，节省资源）───
+      if (hasPlaced) return;
+
       if (XR8.XrController.hitTest) {
         const hits = XR8.XrController.hitTest(0.5, 0.5, ['ESTIMATED_SURFACE', 'FEATURE_POINT']);
         canPlace = !!(hits && hits.length);
