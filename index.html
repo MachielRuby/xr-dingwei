@@ -9,11 +9,11 @@
       html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
 
       #xr-canvas {
-        /* XR8 管理 buffer 尺寸，CSS 只控制显示位置和铺满行为 */
+        /* 移除 object-fit，让 8th Wall 内部引擎自己控制宽高比，避免和 CSS 产生放大冲突 */
         position: fixed; inset: 0;
-        width: 100%; height: 100%;
-        object-fit: cover;   /* 保持摄像头比例铺满，不拉伸 */
+        width: 100vw; height: 100vh;
         z-index: 0;
+        display: block;
       }
       #three-canvas {
         position: fixed; inset: 0;
@@ -86,7 +86,12 @@
       注意：xr-slam.js 无需单独加载，SLAM 能力已内置于 xr.js 的 XR8.XrController 中。
       加载它反而会因跨域 CORS 导致 403。
     -->
-    <script src="/xr.js"></script>
+    <!-- 
+      修改加载顺序并移除 xr-slam.js：
+      8th Wall standalone 版本中，XR8 很多时候已经通过 xr.js 集成了模块。
+      有些打包版本中 xr-slam.js 是 ES Module 格式或作为 Worker 引用，不应该使用 <script src> 标签直接引入
+    -->
+    <script src="/xr-standalone/xr.js"></script>
     <script src="/three.min.js"></script>
     <script type="module" src="/src/main.js"></script>
   </body>

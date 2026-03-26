@@ -92,9 +92,6 @@ function onTouch(e) {
   if (hits && hits.length) placeAnchoredModel(hits[0].position, hits[0].rotation);
 }
 
-// ─── 启动入口：监听 xrloaded 事件（XR8 官方就绪信号）────────────────────────
-// xr.js 异步初始化完成后会 dispatch 'xrloaded'，此时 window.XR8 才真正可用。
-// 不能用 window.load，load 可能比 XR8 初始化更早触发。
 const XR_TIMEOUT = 10000; // 10s 超时兜底
 
 const xrTimer = setTimeout(() => {
@@ -102,7 +99,7 @@ const xrTimer = setTimeout(() => {
   console.error('[XR] xrloaded 事件 10s 内未触发。可能原因：\n  1. 页面未走 HTTPS\n  2. CDN 被屏蔽或网络异常');
 }, XR_TIMEOUT);
 
-window.addEventListener('xrloaded', () => {
+const onXRLoad = () => {
   clearTimeout(xrTimer);
   THREE = window.THREE;
 
@@ -166,7 +163,7 @@ window.addEventListener('xrloaded', () => {
 
   window.addEventListener('touchstart', onTouch, { passive: false });
 
-  // 桌面浏览器用鼠标点击测试（手机上 touchstart 优先，click 不会重复触发）
+  // 桌面浏览器用鼠标点击测试
   window.addEventListener('click', e => {
     if (!canPlace) return;
     const rect = xrCanvas.getBoundingClientRect();
@@ -179,10 +176,19 @@ window.addEventListener('xrloaded', () => {
     );
     if (hits && hits.length) placeAnchoredModel(hits[0].position, hits[0].rotation);
   });
-
+  
   XR8.run({
     canvas: xrCanvas,
-    // 让 XR8 自动把 canvas 尺寸设为屏幕全分辨率
+    allowedDevices: XR8.XrConfig.device().ANY, 
+    cameraConfig: {
+      direction: XR8.XrConfig.camera().BACK
+    },
     webgl2: true,
   });
-});
+};
+
+if (window.XR8) {
+  onXRLoad();
+} else {
+  window.addEventListener('xrloaded', onXRLoad);
+}
