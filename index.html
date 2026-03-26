@@ -75,15 +75,17 @@
       3. three.js   —— 3D 渲染引擎
       4. main.js    —— 业务逻辑（type=module 确保在前三者之后执行）
     -->
-    <!-- xr.js / three.js：经典脚本，同步执行，先于所有 module 脚本挂载全局 -->
+    <!--
+      加载顺序：
+      1. xr.js      —— 8th Wall 核心运行时，内含 SLAM / XrController，挂载 window.XR8
+      2. three.js   —— 3D 渲染引擎，挂载 window.THREE
+      3. main.js    —— 业务逻辑（type=module 保证在上面两个同步脚本之后执行）
+
+      注意：xr-slam.js 无需单独加载，SLAM 能力已内置于 xr.js 的 XR8.XrController 中。
+      加载它反而会因跨域 CORS 导致 403。
+    -->
     <script src="https://static.fczsyx.com/script/webar/xr.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
-    <!--
-      xr-slam.js 是 ES Module；加 type="module" 后浏览器延迟执行它（defer 语义）。
-      module 脚本按文档顺序执行：xr-slam.js → main.js，
-      此时 XR8 / THREE 均已由上方经典脚本挂载到 window，顺序完全正确。
-    -->
-    <script type="module" src="https://static.fczsyx.com/script/webar/xr-slam.js"></script>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>
