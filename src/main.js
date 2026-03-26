@@ -18,7 +18,7 @@ let canPlace   = false;
 let placeCount = 0;
 let hasLoggedReality = false;
 let glbTemplate = null;           // 加载后的 GLB 模型模板
-let trackingReady = false;        // SLAM 追踪是否 NORMAL
+let _debugTimer = 0;              // 调试日志节流
 
 // 瞄准环平滑插值
 const _retPos  = new THREE.Vector3();
@@ -179,13 +179,20 @@ const onXRLoad = async () => {
         hasLoggedReality = true;
         console.log('[SLAM] First reality data, keys:', Object.keys(reality));
         console.log('[SLAM] trackingStatus:', reality.trackingStatus);
+        console.log('[SLAM] Full reality sample:', JSON.stringify(reality).slice(0, 500));
+      }
+
+      // 每3秒输出一次调试信息
+      _debugTimer++;
+      if (_debugTimer % 180 === 0) {
+        console.log('[DEBUG] reality:', !!reality,
+          'status:', reality?.trackingStatus,
+          'intrinsics:', !!reality?.intrinsics,
+          'position:', reality?.position,
+          'hitTest available:', !!XR8.XrController?.hitTest);
       }
 
       if (!reality) return;
-
-      // 检查追踪状态
-      const status = reality.trackingStatus;
-      trackingReady = (status === 'NORMAL');
 
       // ★ 同步 SLAM 相机 → Three.js 相机（手动管理矩阵）
       if (reality.intrinsics) {
@@ -202,21 +209,18 @@ const onXRLoad = async () => {
       camera.updateMatrix();
       camera.updateMatrixWorld(true);
 
-      // ─── 瞄准环 hitTest ───
-      if (!trackingReady) {
-        reticle.visible = false;
-        canPlace = false;
-        tipEl.textContent = '移动手机缓慢扫描地面...';
-        return;
-      }
-
+      // ─── 瞄准环 hitTest（不再门控 trackingStatus，直接尝试）───
       if (XR8.XrController.hitTest) {
-        const hits = XR8.XrController.hitTest(0.5, 0.5, ['ESTIMATED_SURFACE']);
+        const hits = XR8.XrController.hitTest(0.5, 0.5, ['ESTIMATED_SURFACE', 'FEATURE_POINT']);
         canPlace = !!(hits && hits.length);
+
+        if (_debugTimer % 180 === 0) {
+          console.log('[DEBUG] hitTest result:', hits?.length || 0, 'canPlace:', canPlace);
+        }
 
         if (canPlace) {
           const { position: p, rotation: q } = hits[0];
-          const t = _retReady ? 0.15 : 1;  // 首次瞬移，之后平滑
+          const t = _retReady ? 0.15 : 1;
 
           _retPos.lerp(new THREE.Vector3(p.x, p.y, p.z), t);
           reticle.position.copy(_retPos);
@@ -228,9 +232,13 @@ const onXRLoad = async () => {
           _retReady = true;
           tipEl.textContent = '点击屏幕放置模型';
         } else {
-          tipEl.textContent = '对准平面...';
+          tipEl.textContent = reality.trackingStatus === 'NORMAL'
+            ? '对准平面...'
+            : '移动手机缓慢扫描地面...';
         }
         reticle.visible = canPlace;
+      } else {
+        tipEl.textContent = '正在初始化SLAM...';
       }
     },
 
