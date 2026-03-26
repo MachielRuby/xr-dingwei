@@ -15,7 +15,7 @@ const loadingEl = document.getElementById('loading');
 
 // ★ 模型缩放比例：GLB 默认 1单位=1m，Blender 以 cm 建模导出后需要 ×0.01 换算成米
 // 如果模型仍然太大/太小，调整这个值（0.01 = Blender cm, 0.001 = Blender mm, 1.0 = 已是米）
-const MODEL_SCALE = 0.1;
+const MODEL_SCALE = 1.0;
 
 let scene, camera, renderer, reticle;
 let canPlace   = false;
@@ -50,14 +50,20 @@ function loadModel() {
       const size = box.getSize(new THREE.Vector3());
       glbTemplate.position.y = -box.min.y;
 
-      // 遍历所有 Mesh，确保 PBR 材质的 encoding 正确
+      // 遍历所有 Mesh：DoubleSide 允许从内部看到面，关闭 frustumCulled 防止进入模型后消失
       glbTemplate.traverse(child => {
         if (child.isMesh) {
           child.castShadow    = true;
           child.receiveShadow = true;
-          if (child.material) {
-            child.material.needsUpdate = true;
-          }
+          child.frustumCulled = false;  // 在模型内部时不被视锥剔除
+          // 处理单材质和多材质数组
+          const mats = Array.isArray(child.material) ? child.material : [child.material];
+          mats.forEach(mat => {
+            if (mat) {
+              mat.side = THREE.DoubleSide;  // 双面渲染，站在内部也能看见面
+              mat.needsUpdate = true;
+            }
+          });
         }
       });
 
