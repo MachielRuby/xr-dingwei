@@ -13,12 +13,16 @@ const tipEl     = document.getElementById('tip');
 const countEl   = document.getElementById('count');
 const loadingEl = document.getElementById('loading');
 
+// ★ 模型缩放比例：GLB 默认 1单位=1m，Blender 以 cm 建模导出后需要 ×0.01 换算成米
+// 如果模型仍然太大/太小，调整这个值（0.01 = Blender cm, 0.001 = Blender mm, 1.0 = 已是米）
+const MODEL_SCALE = 0.01;
+
 let scene, camera, renderer, reticle;
 let canPlace   = false;
 let placeCount = 0;
 let hasLoggedReality = false;
-let glbTemplate = null;           // 加载后的 GLB 模型模板
-let _debugTimer = 0;              // 调试日志节流
+let glbTemplate = null;
+let _debugTimer = 0;
 
 // 瞄准环平滑插值
 const _retPos  = new THREE.Vector3();
@@ -37,11 +41,28 @@ function loadModel() {
     '/01.glb',
     (gltf) => {
       glbTemplate = gltf.scene;
-      // 不缩放，保持原始尺寸，只做底部对齐
-      const box = new THREE.Box3().setFromObject(glbTemplate);
+
+      // 统一缩放（Blender cm 导出需要 ×0.01 才是真实米单位）
+      glbTemplate.scale.setScalar(MODEL_SCALE);
+
+      // 底面贴地：计算缩放后的包围盒，把底部对齐 y=0
+      const box  = new THREE.Box3().setFromObject(glbTemplate);
       const size = box.getSize(new THREE.Vector3());
-      glbTemplate.position.y = -box.min.y; // 底面贴地
-      console.log('[MODEL] 01.glb loaded, original size:', size.x.toFixed(3), size.y.toFixed(3), size.z.toFixed(3));
+      glbTemplate.position.y = -box.min.y;
+
+      // 遍历所有 Mesh，确保 PBR 材质的 encoding 正确
+      glbTemplate.traverse(child => {
+        if (child.isMesh) {
+          child.castShadow    = true;
+          child.receiveShadow = true;
+          if (child.material) {
+            child.material.needsUpdate = true;
+          }
+        }
+      });
+
+      console.log('[MODEL] size(m):', size.x.toFixed(2), size.y.toFixed(2), size.z.toFixed(2),
+        '(scale =', MODEL_SCALE, ')  → 如模型太大/太小请调整顶部 MODEL_SCALE');
     },
     undefined,
     (err) => console.error('[MODEL] Failed to load 01.glb:', err)
@@ -63,18 +84,28 @@ function initThree(canvas, glContext, w, h) {
   });
   renderer.autoClear = false;
   renderer.setSize(w, h, false);
+  // PBR 必须项：正确的色彩空间 + 物理光照
+  renderer.outputEncoding       = THREE.sRGBEncoding;
+  renderer.physicallyCorrectLights = true;
 
-  scene.add(new THREE.AmbientLight(0xffffff, 0.8));
-  const sun = new THREE.DirectionalLight(0xffffff, 1.0);
-  sun.position.set(2, 5, 3);
+  // 半球光（天空蓝 + 地面暖色）— PBR 材质的基础环境光
+  const hemi = new THREE.HemisphereLight(0xddeeff, 0x806040, 2.5);
+  scene.add(hemi);
+  // 主方向光（模拟太阳）
+  const sun = new THREE.DirectionalLight(0xffffff, 3.0);
+  sun.position.set(5, 10, 7);
   scene.add(sun);
+  // 补光（防止背面全黑）
+  const fill = new THREE.DirectionalLight(0xffffff, 0.8);
+  fill.position.set(-5, 3, -4);
+  scene.add(fill);
 
-  // 瞄准环（单位半径1，每帧根据相机距离动态缩放保持屏幕大小恒定）
-  const ringGeo = new THREE.RingGeometry(0.8, 1.2, 48);
+  // 瞄准环：固定物理尺寸 0.3m 半径，近大远小是正常3D透视效果
+  const ringGeo = new THREE.RingGeometry(0.22, 0.30, 48);
   ringGeo.applyMatrix4(new THREE.Matrix4().makeRotationX(-Math.PI / 2));
   reticle = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({
     color: 0x00e6c8, side: THREE.DoubleSide,
-    depthTest: false, transparent: true, opacity: 0.85,
+    depthTest: false, transparent: true, opacity: 0.9,
   }));
   reticle.visible = false;
   reticle.renderOrder = 999;
@@ -222,11 +253,6 @@ const onXRLoad = async () => {
             _retQuat.slerp(new THREE.Quaternion(q.x, q.y, q.z, q.w), t);
             reticle.quaternion.copy(_retQuat);
           }
-
-          // 根据与相机距离动态缩放，保持屏幕占圆大小恒定
-          const dist = camera.position.distanceTo(_retPos);
-          const s = Math.max(0.01, dist * 0.06); // 屏幕半径约占 6% 视角
-          reticle.scale.setScalar(s);
 
           _retReady = true;
           tipEl.textContent = '✓ 点击放置模型';
