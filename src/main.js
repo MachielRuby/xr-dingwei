@@ -15,7 +15,7 @@ const loadingEl = document.getElementById('loading');
 
 // ★ 模型缩放比例：GLB 默认 1单位=1m，Blender 以 cm 建模导出后需要 ×0.01 换算成米
 // 如果模型仍然太大/太小，调整这个值（0.01 = Blender cm, 0.001 = Blender mm, 1.0 = 已是米）
-const MODEL_SCALE = 0.01;
+const MODEL_SCALE = 0.1;
 
 let scene, camera, renderer, reticle;
 let canPlace   = false;
@@ -101,7 +101,7 @@ function initThree(canvas, glContext, w, h) {
   scene.add(fill);
 
   // 瞄准环：固定物理尺寸 0.3m 半径，近大远小是正常3D透视效果
-  const ringGeo = new THREE.RingGeometry(0.22, 0.30, 48);
+  const ringGeo = new THREE.RingGeometry(0.04, 0.06, 48);
   ringGeo.applyMatrix4(new THREE.Matrix4().makeRotationX(-Math.PI / 2));
   reticle = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({
     color: 0x00e6c8, side: THREE.DoubleSide,
