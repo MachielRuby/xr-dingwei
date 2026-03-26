@@ -9,8 +9,8 @@
       html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
 
       #xr-canvas {
+        /* XR8 自己管理 canvas buffer 尺寸，不能用 CSS 强制覆盖，否则会拉伸模糊 */
         position: fixed; inset: 0;
-        width: 100% !important; height: 100% !important;
         z-index: 0;
       }
       #three-canvas {

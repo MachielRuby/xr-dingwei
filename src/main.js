@@ -104,8 +104,9 @@ window.addEventListener('load', () => {
   XR8.addCameraPipelineModule({
     name: 'slam-demo',
 
-    onStart({ canvas }) {
-      initThree(canvas.width, canvas.height);
+    onStart() {
+      // 用屏幕实际尺寸初始化 Three.js，与 #three-canvas 的 100%×100% CSS 对齐
+      initThree(window.innerWidth, window.innerHeight);
       loadingEl.classList.add('hide');
     },
 
