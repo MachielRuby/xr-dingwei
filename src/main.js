@@ -14,7 +14,7 @@ const tipEl     = document.getElementById('tip');
 const countEl   = document.getElementById('count');
 const loadingEl = document.getElementById('loading');
 
-const MODEL_SCALE = 0.3;
+const MODEL_SCALE = 0.25;
 
 let scene, camera, renderer;
 let hasPlaced  = false;
