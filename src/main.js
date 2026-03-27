@@ -7,7 +7,6 @@
 import * as THREE from 'three';
 import { GLTFLoader }  from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
-import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 
 const xrCanvas  = document.getElementById('xr-canvas');
 const tipEl     = document.getElementById('tip');
@@ -19,18 +18,12 @@ const loadingEl = document.getElementById('loading');
 const MODEL_SCALE = 1.0;
 
 let scene, camera, renderer, reticle;
-let canPlace       = false;
-let hasPlaced      = false;   // ★ 只允许放置一次
-let _hasRecentered = false;   // SLAM 首次进入 NORMAL 时重置坐标原点
+let canPlace   = false;
+let hasPlaced  = false;   // ★ 只允许放置一次
+let placeCount = 0;
+let hasLoggedReality = false;
 let glbTemplate = null;
 let _debugTimer = 0;
-let hasLoggedReality = false;
-let placeCount = 0;
-
-// ★ Anchor 系统：用 8th Wall 原生锦点持续修正位置，避免漂移
-let _anchorId    = null;   // addAnchorAtHit 返回的 id
-let _anchorGroup = null;   // 模型所在的 Three.js Group
-let _lastHit     = null;   // 最近一帧的 hitTest 结果（用于创建 anchor）
 
 // 瞄准环平滑插值
 const _retPos  = new THREE.Vector3();
@@ -77,12 +70,6 @@ function loadModel() {
 
       console.log('[MODEL] size(m):', size.x.toFixed(2), size.y.toFixed(2), size.z.toFixed(2),
         '(scale =', MODEL_SCALE, ')  → 如模型太大/太小请调整顶部 MODEL_SCALE');
-
-      // ★ GLB 加载完成后才允许放置
-      if (tipEl.textContent === '模型加载中，请稍候...') {
-        tipEl.textContent = '移动手机缓慢扫描地面以初始化空间定位...';
-      }
-      console.log('[MODEL] GLB ready, placement now allowed');
     },
     undefined,
     (err) => console.error('[MODEL] Failed to load 01.glb:', err)
@@ -104,27 +91,19 @@ function initThree(canvas, glContext, w, h) {
   });
   renderer.autoClear = false;
   renderer.setSize(w, h, false);
-  // PBR 必须项
-  renderer.outputEncoding        = THREE.sRGBEncoding;
+  // PBR 必须项：正确的色彩空间 + 物理光照
+  renderer.outputEncoding       = THREE.sRGBEncoding;
   renderer.physicallyCorrectLights = true;
-  renderer.toneMapping           = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure   = 1.2;
 
-  // ★ 关键：用 PMREMGenerator 生成中性灰环境贴图
-  // 金属 PBR 材质必须有 EnvMap 才能显示颜色，否则全黑
-  const pmrem = new THREE.PMREMGenerator(renderer);
-  pmrem.compileEquirectangularShader();
-  // 用纯白场景生成一个中性环境（让金属面有东西可反射）
-  const neutralEnv = pmrem.fromScene(new RoomEnvironment()).texture;
-  scene.environment = neutralEnv;
-  pmrem.dispose();
-
-  // 环境光 + 方向光（PBR 漫反射部分靠灯光，镜面反射靠 EnvMap）
-  scene.add(new THREE.AmbientLight(0xffffff, 1.5));
-  const sun = new THREE.DirectionalLight(0xffffff, 2.0);
+  // 半球光（天空蓝 + 地面暖色）— PBR 材质的基础环境光
+  const hemi = new THREE.HemisphereLight(0xddeeff, 0x806040, 2.5);
+  scene.add(hemi);
+  // 主方向光（模拟太阳）
+  const sun = new THREE.DirectionalLight(0xffffff, 3.0);
   sun.position.set(5, 10, 7);
   scene.add(sun);
-  const fill = new THREE.DirectionalLight(0xffffff, 0.6);
+  // 补光（防止背面全黑）
+  const fill = new THREE.DirectionalLight(0xffffff, 0.8);
   fill.position.set(-5, 3, -4);
   scene.add(fill);
 
@@ -148,7 +127,17 @@ function initThree(canvas, glContext, w, h) {
 
 // ─── 放置模型 ────────────────────────────────────────────────────────────────
 function placeModel(pos, rot) {
-  const model = glbTemplate.clone();
+  let model;
+  if (glbTemplate) {
+    model = glbTemplate.clone();
+  } else {
+    // GLB 还没加载完，用临时方块
+    model = new THREE.Mesh(
+      new THREE.BoxGeometry(0.15, 0.15, 0.15),
+      new THREE.MeshPhongMaterial({ color: 0x00e6c8 })
+    );
+    model.position.y = 0.075;
+  }
 
   const anchor = new THREE.Group();
   anchor.position.set(pos.x, pos.y, pos.z);
@@ -161,31 +150,26 @@ function placeModel(pos, rot) {
   console.log('[PLACE]', pos);
 }
 
-// ─── 触摸/点击放置───────────────────────────────────────────────────────
+// ─── 触摸/点击放置（直接用瞄准环坐标，不重新做 hitTest）────────────────────
 function tryPlace() {
   if (hasPlaced || !canPlace || !_retReady) {
     console.log('[PLACE] skip: hasPlaced=', hasPlaced, 'canPlace=', canPlace, '_retReady=', _retReady);
     return;
   }
-  // ★ GLB 还未加载完，不允许放置
-  if (!glbTemplate) {
-    tipEl.textContent = '模型加载中，请稍候...';
-    console.warn('[PLACE] GLB not loaded yet, skip');
-    return;
-  }
-  hasPlaced = true;
+  hasPlaced = true;  // ★ 立即锁定，禁止再次放置
 
-  // 此版本 8th Wall Standalone 不支持 addAnchorAtHit，直接用固定坐标放置
+  // 直接取瞄准环的世界坐标放置
   placeModel(
     { x: _retPos.x, y: _retPos.y, z: _retPos.z },
     { x: _retQuat.x, y: _retQuat.y, z: _retQuat.z, w: _retQuat.w }
   );
 
+  // 放置后：隐藏瞄准环、更新提示
   reticle.visible = false;
   canPlace = false;
-  tipEl.textContent = '模型已锚定';
+  tipEl.textContent = '✓ 模型已锚定';
   countEl.style.display = 'none';
-  console.log('[PLACE] anchored at', _retPos);
+  console.log('[PLACE] Model anchored at', _retPos);
 }
 
 // ─── 等待 XR8 就绪 ───────────────────────────────────────────────────────────
@@ -265,58 +249,11 @@ const onXRLoad = async () => {
       camera.updateMatrix();
       camera.updateMatrixWorld(true);
 
-      // ─── 已放置：每帧用 8th Wall 靖点更新的坐标驱动模型────────────────
-      if (hasPlaced) {
-        // ★ 核心：将 8th Wall 持续修正的 anchor 坐标同步到 Three.js Group
-        if (_anchorId && reality.anchors && _anchorGroup) {
-          const a = reality.anchors.find(x => x.id === _anchorId);
-          if (a) {
-            _anchorGroup.position.set(a.position.x, a.position.y, a.position.z);
-            if (a.rotation) {
-              _anchorGroup.quaternion.set(a.rotation.x, a.rotation.y, a.rotation.z, a.rotation.w);
-            }
-          }
-        }
-        // 监控追踪状态
-        if (reality.trackingStatus !== 'NORMAL') {
-          tipEl.style.color = '#ff6b6b';
-          tipEl.textContent = '⚠️ 追踪丢失 — 请缓慢环顾四周重新扫描环境';
-        } else {
-          tipEl.style.color = '';
-          tipEl.textContent = '✓ 模型已锚定';
-        }
-        return;
-      }
-
-      // ★ 必须 trackingStatus === 'NORMAL' 才代表 SLAM 真正在稳定追踪
-      if (reality.trackingStatus !== 'NORMAL') {
-        reticle.visible = false;
-        canPlace = false;
-        tipEl.textContent = '移动手机缓慢扫描地面以初始化空间定位...';
-        return;
-      }
-
-      if (!_hasRecentered) {
-        _hasRecentered = true;
-        if (XR8.XrController.recenterXrOrigin) {
-          XR8.XrController.recenterXrOrigin();
-          console.log('[SLAM] World origin recentered at first NORMAL tracking');
-        }
-        _retReady = false; 
-        return;           
-      }
+      // ─── 瞄准环 hitTest（已放置后跳过，节省资源）───
+      if (hasPlaced) return;
 
       if (XR8.XrController.hitTest) {
-        let hits = XR8.XrController.hitTest(0.5, 0.5, ['PLANE','ESTIMATED_SURFACE']);
-
-        if (!hits || hits.length === 0) {
-          const fpHits = XR8.XrController.hitTest(0.5, 0.5, ['FEATURE_POINT']);
-          if (fpHits && fpHits.length > 0) {
-            const camY = camera.position.y;
-            hits = fpHits.filter(h => camY - h.position.y > 0.5);
-          }
-        }
-
+        const hits = XR8.XrController.hitTest(0.5, 0.5, ['ESTIMATED_SURFACE', 'FEATURE_POINT']);
         canPlace = !!(hits && hits.length);
 
         if (_debugTimer % 180 === 0) {
@@ -325,7 +262,6 @@ const onXRLoad = async () => {
 
         if (canPlace) {
           const { position: p, rotation: q } = hits[0];
-          _lastHit = hits[0];  // ★ 保存最近一帧的 hit，用于 addAnchorAtHit
           const t = _retReady ? 0.15 : 1;
 
           _retPos.lerp(new THREE.Vector3(p.x, p.y, p.z), t);
@@ -337,9 +273,11 @@ const onXRLoad = async () => {
           }
 
           _retReady = true;
-          tipEl.textContent = '✓ 检测到平面，点击放置模型';
+          tipEl.textContent = '✓ 点击放置模型';
         } else {
-          tipEl.textContent = '对准地面，缓慢移动手机扫描平面...';
+          tipEl.textContent = reality.trackingStatus === 'NORMAL'
+            ? '对准平面...'
+            : '移动手机缓慢扫描地面...';
         }
         reticle.visible = canPlace;
       } else {
@@ -355,6 +293,7 @@ const onXRLoad = async () => {
 
     onCanvasSizeChange({ canvasWidth, canvasHeight }) {
       if (!renderer) return;
+      // ★ 只更新渲染尺寸，不碰 projectionMatrix（由 SLAM 每帧提供）
       renderer.setSize(canvasWidth, canvasHeight, false);
     },
   });
