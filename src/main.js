@@ -158,24 +158,17 @@ function placeModel(pos, rot) {
 
 // ─── 触摸/点击放置───────────────────────────────────────────────────────
 function tryPlace() {
-  if (hasPlaced || !canPlace || !_retReady || !_lastHit) {
+  if (hasPlaced || !canPlace || !_retReady) {
     console.log('[PLACE] skip: hasPlaced=', hasPlaced, 'canPlace=', canPlace, '_retReady=', _retReady);
     return;
   }
   hasPlaced = true;
 
-  if (XR8.XrController.addAnchorAtHit) {
-    const result = XR8.XrController.addAnchorAtHit(_lastHit);
-    _anchorId    = result.id;
-    _anchorGroup = createModelGroup();
-    console.log('[PLACE] XR8 Anchor created, id=', _anchorId);
-  } else {
-    // 降级：该版本不支持 anchor API，回退到固定坐标方式
-    console.warn('[PLACE] addAnchorAtHit not available, using fixed position (may drift)');
-    _anchorGroup = createModelGroup();
-    _anchorGroup.position.set(_retPos.x, _retPos.y, _retPos.z);
-    _anchorGroup.quaternion.set(_retQuat.x, _retQuat.y, _retQuat.z, _retQuat.w);
-  }
+  // 此版本 8th Wall Standalone 不支持 addAnchorAtHit，直接用固定坐标放置
+  placeModel(
+    { x: _retPos.x, y: _retPos.y, z: _retPos.z },
+    { x: _retQuat.x, y: _retQuat.y, z: _retQuat.z, w: _retQuat.w }
+  );
 
   reticle.visible = false;
   canPlace = false;
