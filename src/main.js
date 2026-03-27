@@ -27,6 +27,7 @@ const _clock   = new THREE.Clock();
 const _mixers  = [];
 let _placedModel = null;
 let _placedAnchor = null;  // 模型的锚点 Group
+let placeCount = 0;
 
 // ─── 拖拽状态 ──────────────────────────────────────────────────────────────
 let _isDragging  = false;
@@ -142,7 +143,8 @@ function placeModel(pos, rot) {
   if (rot) anchor.quaternion.set(rot.x, rot.y, rot.z, rot.w);
   anchor.add(model);
   scene.add(anchor);
-  _placedModel = model;
+  _placedModel  = model;
+  _placedAnchor = anchor;
   if (glbTemplate?.userData.animations?.length) {
     const mixer = new THREE.AnimationMixer(model);
     _mixers.push(mixer);
@@ -217,6 +219,32 @@ function getPlacementHit() {
   }
 
   return null;
+}
+
+// ─── 拖拽：将模型锚点移到触摸点的 hitTest 位置 ──────────────────────────────
+function moveModelToTouch(clientX, clientY) {
+  if (!_placedAnchor || !XR8.XrController?.hitTest) return;
+
+  const nx = clientX / window.innerWidth;
+  const ny = clientY / window.innerHeight;
+
+  const testModes = [
+    ['ESTIMATED_SURFACE'],
+    ['ESTIMATED_SURFACE', 'FEATURE_POINT'],
+    ['FEATURE_POINT'],
+  ];
+
+  for (const modes of testModes) {
+    const hits = XR8.XrController.hitTest(nx, ny, modes);
+    if (hits && hits.length) {
+      const h = hits[0];
+      _placedAnchor.position.set(h.position.x, h.position.y, h.position.z);
+      if (h.rotation) {
+        _placedAnchor.quaternion.set(h.rotation.x, h.rotation.y, h.rotation.z, h.rotation.w);
+      }
+      return;
+    }
+  }
 }
 
 // ─── 等待 XR8 就绪 ───────────────────────────────────────────────────────────
@@ -297,41 +325,23 @@ const onXRLoad = async () => {
       const delta = _clock.getDelta();
       if (_mixers.length) _mixers.forEach(m => m.update(delta));
 
-      if (hasPlaced) return;
-
-      if (XR8.XrController.hitTest) {
-        const placementResult = getPlacementHit();
-        canPlace = !!placementResult;
-
-        if (_debugTimer % 180 === 0) {
-          console.log('[DEBUG] hitTest result:', canPlace,
-            'sample:', placementResult?.sample,
-            'modes:', placementResult?.modes,
-            'trackingStatus:', reality?.trackingStatus);
-        }
-
-        if (canPlace) {
-          const { position: p, rotation: q } = placementResult.hit;
-          const t = _retReady ? 0.15 : 1;
-
-          _retPos.lerp(new THREE.Vector3(p.x, p.y, p.z), t);
-          reticle.position.copy(_retPos);
-
-          if (q) {
-            _retQuat.slerp(new THREE.Quaternion(q.x, q.y, q.z, q.w), t);
-            reticle.quaternion.copy(_retQuat);
-          }
-
-          _retReady = true;
-          tipEl.textContent = '✓ 点击放置模型';
+      // ─ 自动放置：首次 hitTest 成功 + 模型已加载 → 立即放 ─
+      if (!hasPlaced && glbTemplate && XR8.XrController.hitTest) {
+        const result = getPlacementHit();
+        const hit = result?.hit;
+        if (hit) {
+          hasPlaced = true;
+          placeModel(
+            { x: hit.position.x, y: hit.position.y, z: hit.position.z },
+            hit.rotation ? { x: hit.rotation.x, y: hit.rotation.y, z: hit.rotation.z, w: hit.rotation.w } : null
+          );
+          tipEl.textContent = '✓ 模型已放置，拖拽可移动';
+          countEl.style.display = 'none';
         } else {
           tipEl.textContent = reality.trackingStatus === 'NORMAL'
-            ? '继续缓慢移动，先对准地面/桌面边缘纹理...'
+            ? '对准地面，即将自动放置...'
             : `正在建图(${reality.trackingStatus || 'INIT'})，请缓慢扫地面...`;
         }
-        reticle.visible = canPlace;
-      } else {
-        tipEl.textContent = '正在初始化SLAM...';
       }
     },
 
@@ -347,19 +357,52 @@ const onXRLoad = async () => {
     },
   });
 
+  // ─── 触摸事件：拖拽移动 + 点击播放动画 ─────────────────────────────────────
   window.addEventListener('touchstart', (e) => {
     e.preventDefault();
-    if (!hasPlaced) {
-      tryPlace();
-    } else {
-      const t = e.touches[0];
-      tryPlayAnimation(t.clientX, t.clientY);
-    }
+    if (!hasPlaced) return;
+    const t = e.touches[0];
+    _isDragging    = true;
+    _dragConfirmed = false;
+    _touchStartX   = t.clientX;
+    _touchStartY   = t.clientY;
   }, { passive: false });
 
+  window.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    if (!_isDragging || !hasPlaced) return;
+    const t = e.touches[0];
+
+    if (!_dragConfirmed) {
+      const dx = t.clientX - _touchStartX;
+      const dy = t.clientY - _touchStartY;
+      if (Math.sqrt(dx * dx + dy * dy) < DRAG_THRESHOLD) return;
+      _dragConfirmed = true;
+      tipEl.textContent = '拖拽中...';
+    }
+
+    moveModelToTouch(t.clientX, t.clientY);
+  }, { passive: false });
+
+  window.addEventListener('touchend', () => {
+    if (!_isDragging) return;
+
+    if (_dragConfirmed) {
+      tipEl.textContent = '✓ 模型已固定，拖拽可移动';
+      console.log('[DRAG] Model repositioned to',
+        _placedAnchor?.position.x.toFixed(3),
+        _placedAnchor?.position.y.toFixed(3),
+        _placedAnchor?.position.z.toFixed(3));
+    } else {
+      tryPlayAnimation(_touchStartX, _touchStartY);
+    }
+
+    _isDragging    = false;
+    _dragConfirmed = false;
+  });
+
   window.addEventListener('click', (e) => {
-    if (!hasPlaced) { tryPlace(); }
-    else { tryPlayAnimation(e.clientX, e.clientY); }
+    if (hasPlaced) tryPlayAnimation(e.clientX, e.clientY);
   });
 
   function resizeCanvas() {
