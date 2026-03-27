@@ -1,8 +1,8 @@
 /**
  * XR SLAM 空间定位
- * - 用 npm three (r128) + GLTFLoader/DRACOLoader 加载 01.glb
- * - 相机矩阵完全由 SLAM 驱动 (matrixAutoUpdate = false)
- * - 只有 trackingStatus === NORMAL 时才显示瞄准环、允许放置
+ * - 自动放置模型（首次 hitTest 成功即放）
+ * - 手指拖拽可在空间中移动模型
+ * - 松手后模型固定在世界坐标，SLAM 保持定位
  */
 import * as THREE from 'three';
 import { GLTFLoader }    from 'three/examples/jsm/loaders/GLTFLoader.js';
@@ -16,23 +16,24 @@ const loadingEl = document.getElementById('loading');
 
 const MODEL_SCALE = 0.25;
 
-let scene, camera, renderer, reticle;
-let canPlace   = false;
-let hasPlaced  = false;   // ★ 只允许放置一次
-let placeCount = 0;
+let scene, camera, renderer;
+let hasPlaced  = false;
 let hasLoggedReality = false;
 let glbTemplate = null;
 let _debugTimer = 0;
-
-// 瞄准环平滑插值
-const _retPos  = new THREE.Vector3();
-const _retQuat = new THREE.Quaternion();
-let   _retReady = false;
 
 // 动画相关
 const _clock   = new THREE.Clock();
 const _mixers  = [];
 let _placedModel = null;
+let _placedAnchor = null;  // 模型的锚点 Group
+
+// ─── 拖拽状态 ──────────────────────────────────────────────────────────────
+let _isDragging  = false;
+let _touchStartX = 0;
+let _touchStartY = 0;
+const DRAG_THRESHOLD = 8; // px，区分点击和拖拽
+let _dragConfirmed = false;
 
 // 命中测试采样点（屏幕归一化坐标），从常用中心到底部区域逐步尝试
 const HIT_TEST_POINTS = [
@@ -115,17 +116,6 @@ function initThree(canvas, glContext, w, h) {
   const fill = new THREE.DirectionalLight(0xffffff, 0.8);
   fill.position.set(-5, 3, -4);
   scene.add(fill);
-
-  const ringGeo = new THREE.RingGeometry(0.04, 0.06, 48);
-  ringGeo.applyMatrix4(new THREE.Matrix4().makeRotationX(-Math.PI / 2));
-  reticle = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({
-    color: 0x00e6c8, side: THREE.DoubleSide,
-    depthTest: false, transparent: true, opacity: 0.9,
-  }));
-  reticle.visible = false;
-  reticle.renderOrder = 999;
-  reticle.frustumCulled = false;
-  scene.add(reticle);
 
   // 开始加载 GLB 模型
   loadModel();
