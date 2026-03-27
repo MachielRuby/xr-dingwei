@@ -49,7 +49,6 @@ function loadModel() {
       glbTemplate.userData.animations = gltf.animations;
       console.log('[MODEL] animations:', gltf.animations.length, gltf.animations.map(a => a.name));
 
-      // 统一缩放（Blender cm 导出需要 ×0.01 才是真实米单位）
       glbTemplate.scale.setScalar(MODEL_SCALE);
 
       // 底面贴地：计算缩放后的包围盒，把底部对齐 y=0
@@ -82,11 +81,9 @@ function loadModel() {
   );
 }
 
-// ─── Three.js 初始化（共享 XR8 的 WebGL 上下文） ─────────────────────────────
 function initThree(canvas, glContext, w, h) {
   scene  = new THREE.Scene();
   camera = new THREE.PerspectiveCamera(60, w / h, 0.01, 1000);
-  // ★ 关键：禁止 Three.js 自动更新相机矩阵，全部由 SLAM 数据驱动
   camera.matrixAutoUpdate = false;
 
   renderer = new THREE.WebGLRenderer({
@@ -113,7 +110,6 @@ function initThree(canvas, glContext, w, h) {
   fill.position.set(-5, 3, -4);
   scene.add(fill);
 
-  // 瞄准环：固定物理尺寸 0.3m 半径，近大远小是正常3D透视效果
   const ringGeo = new THREE.RingGeometry(0.04, 0.06, 48);
   ringGeo.applyMatrix4(new THREE.Matrix4().makeRotationX(-Math.PI / 2));
   reticle = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({
@@ -272,7 +268,6 @@ const onXRLoad = async () => {
 
       if (!reality) return;
 
-      // ★ 同步 SLAM 相机 → Three.js 相机（手动管理矩阵）
       if (reality.intrinsics) {
         camera.projectionMatrix.fromArray(reality.intrinsics);
         camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
@@ -283,15 +278,12 @@ const onXRLoad = async () => {
       if (reality.position) {
         camera.position.set(reality.position.x, reality.position.y, reality.position.z);
       }
-      // 手动更新世界矩阵（因为 matrixAutoUpdate = false）
       camera.updateMatrix();
       camera.updateMatrixWorld(true);
 
-      // 每帧更新动画 Mixer
       const delta = _clock.getDelta();
       if (_mixers.length) _mixers.forEach(m => m.update(delta));
 
-      // ─── 瞄准环 hitTest（已放置后跳过，节省资源）───
       if (hasPlaced) return;
 
       if (XR8.XrController.hitTest) {
@@ -335,12 +327,10 @@ const onXRLoad = async () => {
 
     onCanvasSizeChange({ canvasWidth, canvasHeight }) {
       if (!renderer) return;
-      // ★ 只更新渲染尺寸，不碰 projectionMatrix（由 SLAM 每帧提供）
       renderer.setSize(canvasWidth, canvasHeight, false);
     },
   });
 
-  // 触摸：未放置时放置，已放置时触发动画
   window.addEventListener('touchstart', (e) => {
     e.preventDefault();
     if (!hasPlaced) {
@@ -351,13 +341,11 @@ const onXRLoad = async () => {
     }
   }, { passive: false });
 
-  // 鼠标点击（调试用）
   window.addEventListener('click', (e) => {
     if (!hasPlaced) { tryPlace(); }
     else { tryPlayAnimation(e.clientX, e.clientY); }
   });
 
-  // ═══ 设置 canvas 缓冲区尺寸 ═══
   function resizeCanvas() {
     const dpr = window.devicePixelRatio || 1;
     xrCanvas.width  = Math.round(window.innerWidth * dpr);
