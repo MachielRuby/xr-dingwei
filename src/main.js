@@ -5,8 +5,9 @@
  * - 只有 trackingStatus === NORMAL 时才显示瞄准环、允许放置
  */
 import * as THREE from 'three';
-import { GLTFLoader }  from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
+import { GLTFLoader }    from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { DRACOLoader }   from 'three/examples/jsm/loaders/DRACOLoader.js';
+import { SkeletonUtils } from 'three/examples/jsm/utils/SkeletonUtils.js';
 
 const xrCanvas  = document.getElementById('xr-canvas');
 const tipEl     = document.getElementById('tip');
@@ -28,6 +29,11 @@ const _retPos  = new THREE.Vector3();
 const _retQuat = new THREE.Quaternion();
 let   _retReady = false;
 
+// 动画相关
+const _clock   = new THREE.Clock();
+const _mixers  = [];
+let _placedModel = null;
+
 // ─── 加载 GLB 模型 ───────────────────────────────────────────────────────────
 function loadModel() {
   const dracoLoader = new DRACOLoader();
@@ -40,6 +46,8 @@ function loadModel() {
     '/01.glb',
     (gltf) => {
       glbTemplate = gltf.scene;
+      glbTemplate.userData.animations = gltf.animations;
+      console.log('[MODEL] animations:', gltf.animations.length, gltf.animations.map(a => a.name));
 
       // 统一缩放（Blender cm 导出需要 ×0.01 才是真实米单位）
       glbTemplate.scale.setScalar(MODEL_SCALE);
@@ -127,7 +135,7 @@ function initThree(canvas, glContext, w, h) {
 function placeModel(pos, rot) {
   let model;
   if (glbTemplate) {
-    model = glbTemplate.clone();
+    model = SkeletonUtils.clone(glbTemplate);  // 骨骼动画必须用 SkeletonUtils.clone
   } else {
     // GLB 还没加载完，用临时方块
     model = new THREE.Mesh(
@@ -142,6 +150,16 @@ function placeModel(pos, rot) {
   if (rot) anchor.quaternion.set(rot.x, rot.y, rot.z, rot.w);
   anchor.add(model);
   scene.add(anchor);
+
+  // 保存已放置的模型引用，用于点击触发动画
+  _placedModel = model;
+
+  // 若模型有动画，创建 Mixer（先不播放，等点击触发）
+  if (glbTemplate?.userData.animations?.length) {
+    const mixer = new THREE.AnimationMixer(model);
+    _mixers.push(mixer);
+    console.log('[ANIM] Mixer created, animations:', glbTemplate.userData.animations.length);
+  }
 
   placeCount++;
   countEl.textContent = `已放置：${placeCount}`;
@@ -168,6 +186,28 @@ function tryPlace() {
   tipEl.textContent = '✓ 模型已锚定';
   countEl.style.display = 'none';
   console.log('[PLACE] Model anchored at', _retPos);
+}
+
+// ─── 点击已放置的模型播放动画 ─────────────────────────────────────────────────
+function tryPlayAnimation(clientX, clientY) {
+  if (!_placedModel || !_mixers.length || !glbTemplate?.userData.animations?.length) return;
+
+  // 射线检测是否点中模型
+  const ndcX = (clientX / window.innerWidth)  *  2 - 1;
+  const ndcY = (clientY / window.innerHeight) * -2 + 1;
+  const ray  = new THREE.Raycaster();
+  ray.setFromCamera(new THREE.Vector2(ndcX, ndcY), camera);
+  if (!ray.intersectObject(_placedModel, true).length) return;
+
+  // 重置并播放第一个动画（循环）
+  const mixer  = _mixers[0];
+  const clip   = glbTemplate.userData.animations[0];
+  const action = mixer.clipAction(clip);
+  action.reset();
+  action.loop = THREE.LoopRepeat;
+  action.play();
+  tipEl.textContent = '▶ 动画播放中';
+  console.log('[ANIM] Playing:', clip.name);
 }
 
 // ─── 等待 XR8 就绪 ───────────────────────────────────────────────────────────
@@ -247,11 +287,15 @@ const onXRLoad = async () => {
       camera.updateMatrix();
       camera.updateMatrixWorld(true);
 
+      // 每帧更新动画 Mixer
+      const delta = _clock.getDelta();
+      if (_mixers.length) _mixers.forEach(m => m.update(delta));
+
       // ─── 瞄准环 hitTest（已放置后跳过，节省资源）───
       if (hasPlaced) return;
 
       if (XR8.XrController.hitTest) {
-        const hits = XR8.XrController.hitTest(0.5, 0.5, ['ESTIMATED_SURFACE', 'FEATURE_POINT']);
+        const hits = XR8.XrController.hitTest(0.5, 0.5, ['ESTIMATED_SURFACE']);
         canPlace = !!(hits && hits.length);
 
         if (_debugTimer % 180 === 0) {
@@ -296,14 +340,22 @@ const onXRLoad = async () => {
     },
   });
 
-  // 触摸放置
+  // 触摸：未放置时放置，已放置时触发动画
   window.addEventListener('touchstart', (e) => {
     e.preventDefault();
-    tryPlace();
+    if (!hasPlaced) {
+      tryPlace();
+    } else {
+      const t = e.touches[0];
+      tryPlayAnimation(t.clientX, t.clientY);
+    }
   }, { passive: false });
 
-  // 鼠标放置（调试用）
-  window.addEventListener('click', () => tryPlace());
+  // 鼠标点击（调试用）
+  window.addEventListener('click', (e) => {
+    if (!hasPlaced) { tryPlace(); }
+    else { tryPlayAnimation(e.clientX, e.clientY); }
+  });
 
   // ═══ 设置 canvas 缓冲区尺寸 ═══
   function resizeCanvas() {
