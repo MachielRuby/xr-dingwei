@@ -76,6 +76,12 @@ function loadModel() {
 
       console.log('[MODEL] size(m):', size.x.toFixed(2), size.y.toFixed(2), size.z.toFixed(2),
         '(scale =', MODEL_SCALE, ')  → 如模型太大/太小请调整顶部 MODEL_SCALE');
+
+      // ★ GLB 加载完成后才允许放置
+      if (tipEl.textContent === '模型加载中，请稍候...') {
+        tipEl.textContent = '移动手机缓慢扫描地面以初始化空间定位...';
+      }
+      console.log('[MODEL] GLB ready, placement now allowed');
     },
     undefined,
     (err) => console.error('[MODEL] Failed to load 01.glb:', err)
@@ -133,17 +139,7 @@ function initThree(canvas, glContext, w, h) {
 
 // ─── 放置模型 ────────────────────────────────────────────────────────────────
 function placeModel(pos, rot) {
-  let model;
-  if (glbTemplate) {
-    model = glbTemplate.clone();
-  } else {
-    // GLB 还没加载完，用临时方块
-    model = new THREE.Mesh(
-      new THREE.BoxGeometry(0.15, 0.15, 0.15),
-      new THREE.MeshPhongMaterial({ color: 0x00e6c8 })
-    );
-    model.position.y = 0.075;
-  }
+  const model = glbTemplate.clone();
 
   const anchor = new THREE.Group();
   anchor.position.set(pos.x, pos.y, pos.z);
@@ -162,6 +158,12 @@ function tryPlace() {
     console.log('[PLACE] skip: hasPlaced=', hasPlaced, 'canPlace=', canPlace, '_retReady=', _retReady);
     return;
   }
+  // ★ GLB 还未加载完，不允许放置
+  if (!glbTemplate) {
+    tipEl.textContent = '模型加载中，请稍候...';
+    console.warn('[PLACE] GLB not loaded yet, skip');
+    return;
+  }
   hasPlaced = true;
 
   // 此版本 8th Wall Standalone 不支持 addAnchorAtHit，直接用固定坐标放置
@@ -172,7 +174,7 @@ function tryPlace() {
 
   reticle.visible = false;
   canPlace = false;
-  tipEl.textContent = '✓ 模型已锚定';
+  tipEl.textContent = '模型已锚定';
   countEl.style.display = 'none';
   console.log('[PLACE] anchored at', _retPos);
 }
