@@ -7,6 +7,7 @@
 import * as THREE from 'three';
 import { GLTFLoader }  from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 
 const xrCanvas  = document.getElementById('xr-canvas');
 const tipEl     = document.getElementById('tip');
@@ -103,19 +104,27 @@ function initThree(canvas, glContext, w, h) {
   });
   renderer.autoClear = false;
   renderer.setSize(w, h, false);
-  // PBR 必须项：正确的色彩空间 + 物理光照
-  renderer.outputEncoding       = THREE.sRGBEncoding;
+  // PBR 必须项
+  renderer.outputEncoding        = THREE.sRGBEncoding;
   renderer.physicallyCorrectLights = true;
+  renderer.toneMapping           = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure   = 1.2;
 
-  // 半球光（天空蓝 + 地面暖色）— PBR 材质的基础环境光
-  const hemi = new THREE.HemisphereLight(0xddeeff, 0x806040, 2.5);
-  scene.add(hemi);
-  // 主方向光（模拟太阳）
-  const sun = new THREE.DirectionalLight(0xffffff, 3.0);
+  // ★ 关键：用 PMREMGenerator 生成中性灰环境贴图
+  // 金属 PBR 材质必须有 EnvMap 才能显示颜色，否则全黑
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  pmrem.compileEquirectangularShader();
+  // 用纯白场景生成一个中性环境（让金属面有东西可反射）
+  const neutralEnv = pmrem.fromScene(new RoomEnvironment()).texture;
+  scene.environment = neutralEnv;
+  pmrem.dispose();
+
+  // 环境光 + 方向光（PBR 漫反射部分靠灯光，镜面反射靠 EnvMap）
+  scene.add(new THREE.AmbientLight(0xffffff, 1.5));
+  const sun = new THREE.DirectionalLight(0xffffff, 2.0);
   sun.position.set(5, 10, 7);
   scene.add(sun);
-  // 补光（防止背面全黑）
-  const fill = new THREE.DirectionalLight(0xffffff, 0.8);
+  const fill = new THREE.DirectionalLight(0xffffff, 0.6);
   fill.position.set(-5, 3, -4);
   scene.add(fill);
 
