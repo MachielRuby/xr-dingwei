@@ -261,9 +261,20 @@ const onXRLoad = async () => {
       }
 
       if (XR8.XrController.hitTest) {
-        // ★ 只用 ESTIMATED_SURFACE：必须 SLAM 真正检测到物理平面才命中
-        //    去掉 FEATURE_POINT，否则空气/墙/天花板都会命中，毫无意义
-        const hits = XR8.XrController.hitTest(0.5, 0.5, ['ESTIMATED_SURFACE']);
+        // 优先用 ESTIMATED_SURFACE（真正识别到的平面）
+        let hits = XR8.XrController.hitTest(0.5, 0.5, ['ESTIMATED_SURFACE']);
+
+        // 若没有平面结果，降级用 FEATURE_POINT + 高度过滤：
+        // 只接受 y 坐标比相机低 0.5m 以上的点（地面区域），
+        // 过滤掉墙面、天花板、空气中的乱命中
+        if (!hits || hits.length === 0) {
+          const fpHits = XR8.XrController.hitTest(0.5, 0.5, ['FEATURE_POINT']);
+          if (fpHits && fpHits.length > 0) {
+            const camY = camera.position.y;
+            hits = fpHits.filter(h => camY - h.position.y > 0.5);
+          }
+        }
+
         canPlace = !!(hits && hits.length);
 
         if (_debugTimer % 180 === 0) {
