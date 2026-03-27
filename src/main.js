@@ -252,8 +252,18 @@ const onXRLoad = async () => {
       // ─── 瞄准环 hitTest（已放置后跳过，节省资源）───
       if (hasPlaced) return;
 
+      // ★ 必须 trackingStatus === 'NORMAL' 才代表 SLAM 真正在稳定追踪
+      if (reality.trackingStatus !== 'NORMAL') {
+        reticle.visible = false;
+        canPlace = false;
+        tipEl.textContent = '移动手机缓慢扫描地面以初始化空间定位...';
+        return;
+      }
+
       if (XR8.XrController.hitTest) {
-        const hits = XR8.XrController.hitTest(0.5, 0.5, ['ESTIMATED_SURFACE', 'FEATURE_POINT']);
+        // ★ 只用 ESTIMATED_SURFACE：必须 SLAM 真正检测到物理平面才命中
+        //    去掉 FEATURE_POINT，否则空气/墙/天花板都会命中，毫无意义
+        const hits = XR8.XrController.hitTest(0.5, 0.5, ['ESTIMATED_SURFACE']);
         canPlace = !!(hits && hits.length);
 
         if (_debugTimer % 180 === 0) {
@@ -273,11 +283,9 @@ const onXRLoad = async () => {
           }
 
           _retReady = true;
-          tipEl.textContent = '✓ 点击放置模型';
+          tipEl.textContent = '✓ 检测到平面，点击放置模型';
         } else {
-          tipEl.textContent = reality.trackingStatus === 'NORMAL'
-            ? '对准平面...'
-            : '移动手机缓慢扫描地面...';
+          tipEl.textContent = '对准地面，缓慢移动手机扫描平面...';
         }
         reticle.visible = canPlace;
       } else {
