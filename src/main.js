@@ -295,7 +295,7 @@ const onXRLoad = async () => {
       if (hasPlaced) return;
 
       if (XR8.XrController.hitTest) {
-        const hits = XR8.XrController.hitTest(0.5, 0.5, ['ESTIMATED_SURFACE']);
+        const hits = XR8.XrController.hitTest(0.5, 0.5, ['ESTIMATED_SURFACE', 'FEATURE_POINT']);
         canPlace = !!(hits && hits.length);
 
         if (_debugTimer % 180 === 0) {
