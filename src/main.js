@@ -18,8 +18,9 @@ const loadingEl = document.getElementById('loading');
 const MODEL_SCALE = 1.0;
 
 let scene, camera, renderer, reticle;
-let canPlace   = false;
-let hasPlaced  = false;   // ★ 只允许放置一次
+let canPlace       = false;
+let hasPlaced      = false;   // ★ 只允许放置一次
+let _hasRecentered = false;   // ★ SLAM 首次进入 NORMAL 时重置坐标原点（只做一次）
 let placeCount = 0;
 let hasLoggedReality = false;
 let glbTemplate = null;
@@ -249,8 +250,18 @@ const onXRLoad = async () => {
       camera.updateMatrix();
       camera.updateMatrixWorld(true);
 
-      // ─── 瞄准环 hitTest（已放置后跳过，节省资源）───
-      if (hasPlaced) return;
+      // ─── 已放置：持续监控追踪状态，漂移时给用户实时提示 ───────────────
+      if (hasPlaced) {
+        if (reality.trackingStatus !== 'NORMAL') {
+          // 追踪丢失 = 模型必然漂移，立刻告警
+          tipEl.style.color = '#ff6b6b';
+          tipEl.textContent = '⚠️ 追踪丢失 — 请缓慢环顾四周重新扫描环境';
+        } else {
+          tipEl.style.color = '';
+          tipEl.textContent = '✓ 模型已锚定';
+        }
+        return;
+      }
 
       // ★ 必须 trackingStatus === 'NORMAL' 才代表 SLAM 真正在稳定追踪
       if (reality.trackingStatus !== 'NORMAL') {
@@ -260,13 +271,19 @@ const onXRLoad = async () => {
         return;
       }
 
+      if (!_hasRecentered) {
+        _hasRecentered = true;
+        if (XR8.XrController.recenterXrOrigin) {
+          XR8.XrController.recenterXrOrigin();
+          console.log('[SLAM] World origin recentered at first NORMAL tracking');
+        }
+        _retReady = false; 
+        return;           
+      }
+
       if (XR8.XrController.hitTest) {
-        // 优先用 ESTIMATED_SURFACE（真正识别到的平面）
         let hits = XR8.XrController.hitTest(0.5, 0.5, ['ESTIMATED_SURFACE']);
 
-        // 若没有平面结果，降级用 FEATURE_POINT + 高度过滤：
-        // 只接受 y 坐标比相机低 0.5m 以上的点（地面区域），
-        // 过滤掉墙面、天花板、空气中的乱命中
         if (!hits || hits.length === 0) {
           const fpHits = XR8.XrController.hitTest(0.5, 0.5, ['FEATURE_POINT']);
           if (fpHits && fpHits.length > 0) {
@@ -312,7 +329,6 @@ const onXRLoad = async () => {
 
     onCanvasSizeChange({ canvasWidth, canvasHeight }) {
       if (!renderer) return;
-      // ★ 只更新渲染尺寸，不碰 projectionMatrix（由 SLAM 每帧提供）
       renderer.setSize(canvasWidth, canvasHeight, false);
     },
   });
