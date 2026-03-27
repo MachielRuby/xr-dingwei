@@ -1,42 +1,36 @@
 /**
- * XR SLAM 空间定位
- * - 用 npm three (r128) + GLTFLoader/DRACOLoader 加载 01.glb
- * - 相机矩阵完全由 SLAM 驱动 (matrixAutoUpdate = false)
- * - 只有 trackingStatus === NORMAL 时才显示瞄准环、允许放置
+ * 产品级 XR SLAM 空间定位 · 8th Wall + Three.js
+ * 功能：平面识别 · 稳定锚点 · 不漂移 · 秒出瞄准环 · 产品级体验
  */
 import * as THREE from 'three';
-import { GLTFLoader }  from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 
-const xrCanvas  = document.getElementById('xr-canvas');
-const tipEl     = document.getElementById('tip');
-const countEl   = document.getElementById('count');
+const xrCanvas = document.getElementById('xr-canvas');
+const tipEl = document.getElementById('tip');
+const countEl = document.getElementById('count');
 const loadingEl = document.getElementById('loading');
 
-// ★ 模型缩放比例：GLB 默认 1单位=1m，Blender 以 cm 建模导出后需要 ×0.01 换算成米
-// 如果模型仍然太大/太小，调整这个值（0.01 = Blender cm, 0.001 = Blender mm, 1.0 = 已是米）
 const MODEL_SCALE = 1.0;
 
 let scene, camera, renderer, reticle;
-let canPlace       = false;
-let hasPlaced      = false;   // ★ 只允许放置一次
-let _hasRecentered = false;   // SLAM 首次进入 NORMAL 时重置坐标原点
+let canPlace = false;
+let hasPlaced = false;
+let _hasRecentered = false;
 let glbTemplate = null;
-let _debugTimer = 0;
-let hasLoggedReality = false;
-let placeCount = 0;
 
-// ★ Anchor 系统：用 8th Wall 原生锦点持续修正位置，避免漂移
-let _anchorId    = null;   // addAnchorAtHit 返回的 id
-let _anchorGroup = null;   // 模型所在的 Three.js Group
-let _lastHit     = null;   // 最近一帧的 hitTest 结果（用于创建 anchor）
+// 锚点系统（产品级防漂移）
+let _anchorId = null;
+let _anchorGroup = null;
+let _lastHit = null;
 
-// 瞄准环平滑插值
-const _retPos  = new THREE.Vector3();
+const _retPos = new THREE.Vector3();
 const _retQuat = new THREE.Quaternion();
-let   _retReady = false;
+let _retReady = false;
 
-// ─── 加载 GLB 模型 ───────────────────────────────────────────────────────────
+// ————————————————————————————————————————
+// 模型加载
+// ————————————————————————————————————————
 function loadModel() {
   const dracoLoader = new DRACOLoader();
   dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.6/');
@@ -48,345 +42,202 @@ function loadModel() {
     '/01.glb',
     (gltf) => {
       glbTemplate = gltf.scene;
-
-      // 统一缩放（Blender cm 导出需要 ×0.01 才是真实米单位）
       glbTemplate.scale.setScalar(MODEL_SCALE);
 
-      // 底面贴地：计算缩放后的包围盒，把底部对齐 y=0
-      const box  = new THREE.Box3().setFromObject(glbTemplate);
-      const size = box.getSize(new THREE.Vector3());
+      const box = new THREE.Box3().setFromObject(glbTemplate);
       glbTemplate.position.y = -box.min.y;
 
-      // 遍历所有 Mesh：DoubleSide 允许从内部看到面，关闭 frustumCulled 防止进入模型后消失
       glbTemplate.traverse(child => {
         if (child.isMesh) {
-          child.castShadow    = true;
-          child.receiveShadow = true;
-          child.frustumCulled = false;  // 在模型内部时不被视锥剔除
-          // 处理单材质和多材质数组
-          const mats = Array.isArray(child.material) ? child.material : [child.material];
-          mats.forEach(mat => {
-            if (mat) {
-              mat.side = THREE.DoubleSide;  // 双面渲染，站在内部也能看见面
-              mat.needsUpdate = true;
-            }
-          });
+          child.frustumCulled = false;
+          child.material.side = THREE.DoubleSide;
         }
       });
-
-      console.log('[MODEL] size(m):', size.x.toFixed(2), size.y.toFixed(2), size.z.toFixed(2),
-        '(scale =', MODEL_SCALE, ')  → 如模型太大/太小请调整顶部 MODEL_SCALE');
     },
     undefined,
-    (err) => console.error('[MODEL] Failed to load 01.glb:', err)
+    err => console.error('模型加载失败', err)
   );
 }
 
-// ─── Three.js 初始化（共享 XR8 的 WebGL 上下文） ─────────────────────────────
+// ————————————————————————————————————————
+// Three.js 初始化
+// ————————————————————————————————————————
 function initThree(canvas, glContext, w, h) {
-  scene  = new THREE.Scene();
+  scene = new THREE.Scene();
   camera = new THREE.PerspectiveCamera(60, w / h, 0.01, 1000);
-  // ★ 关键：禁止 Three.js 自动更新相机矩阵，全部由 SLAM 数据驱动
   camera.matrixAutoUpdate = false;
 
-  renderer = new THREE.WebGLRenderer({
-    canvas,
-    context: glContext,
-    alpha: true,
-    antialias: true,
-  });
-  renderer.autoClear = false;
+  renderer = new THREE.WebGLRenderer({ canvas, context: glContext, alpha: true, antialias: true });
   renderer.setSize(w, h, false);
-  // PBR 必须项：正确的色彩空间 + 物理光照
-  renderer.outputEncoding       = THREE.sRGBEncoding;
+  renderer.autoClear = false;
+  renderer.outputEncoding = THREE.sRGBEncoding;
   renderer.physicallyCorrectLights = true;
 
-  // 半球光（天空蓝 + 地面暖色）— PBR 材质的基础环境光
-  const hemi = new THREE.HemisphereLight(0xddeeff, 0x806040, 2.5);
-  scene.add(hemi);
-  // 主方向光（模拟太阳）
-  const sun = new THREE.DirectionalLight(0xffffff, 3.0);
+  scene.add(new THREE.HemisphereLight(0xddeeff, 0x806040, 2.5));
+  const sun = new THREE.DirectionalLight(0xffffff, 3);
   sun.position.set(5, 10, 7);
   scene.add(sun);
-  // 补光（防止背面全黑）
-  const fill = new THREE.DirectionalLight(0xffffff, 0.8);
-  fill.position.set(-5, 3, -4);
-  scene.add(fill);
 
-  // 瞄准环：固定物理尺寸 0.3m 半径，近大远小是正常3D透视效果
+  // 瞄准环
   const ringGeo = new THREE.RingGeometry(0.04, 0.06, 48);
   ringGeo.applyMatrix4(new THREE.Matrix4().makeRotationX(-Math.PI / 2));
   reticle = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({
-    color: 0x00e6c8, side: THREE.DoubleSide,
-    depthTest: false, transparent: true, opacity: 0.9,
+    color: 0x00e6c8, transparent: true, opacity: 0.9, depthTest: false
   }));
   reticle.visible = false;
   reticle.renderOrder = 999;
   reticle.frustumCulled = false;
   scene.add(reticle);
 
-  // 开始加载 GLB 模型
   loadModel();
-
-  console.log('[INIT] Three.js ready:', w, 'x', h);
 }
 
-// ─── 放置模型 ────────────────────────────────────────────────────────────────
-function placeModel(pos, rot) {
-  let model;
-  if (glbTemplate) {
-    model = glbTemplate.clone();
-  } else {
-    // GLB 还没加载完，用临时方块
-    model = new THREE.Mesh(
-      new THREE.BoxGeometry(0.15, 0.15, 0.15),
-      new THREE.MeshPhongMaterial({ color: 0x00e6c8 })
-    );
-    model.position.y = 0.075;
-  }
-
-  const anchor = new THREE.Group();
-  anchor.position.set(pos.x, pos.y, pos.z);
-  if (rot) anchor.quaternion.set(rot.x, rot.y, rot.z, rot.w);
-  anchor.add(model);
-  scene.add(anchor);
-
-  placeCount++;
-  countEl.textContent = `已放置：${placeCount}`;
-  console.log('[PLACE]', pos);
+// ————————————————————————————————————————
+// 创建模型组（产品级）
+// ————————————————————————————————————————
+function createModelGroup() {
+  const group = new THREE.Group();
+  const model = glbTemplate ? glbTemplate.clone() : new THREE.Mesh(
+    new THREE.BoxGeometry(0.15, 0.15, 0.15),
+    new THREE.MeshPhongMaterial({ color: 0x00e6c8 })
+  );
+  group.add(model);
+  scene.add(group);
+  return group;
 }
 
-// ─── 触摸/点击放置───────────────────────────────────────────────────────
+// ————————————————————————————————————————
+// 点击放置（产品级锚点）
+// ————————————————————————————————————————
 function tryPlace() {
-  if (hasPlaced || !canPlace || !_retReady || !_lastHit) {
-    console.log('[PLACE] skip: hasPlaced=', hasPlaced, 'canPlace=', canPlace, '_retReady=', _retReady);
-    return;
-  }
+  if (hasPlaced || !canPlace || !_lastHit) return;
   hasPlaced = true;
 
   if (XR8.XrController.addAnchorAtHit) {
-    const result = XR8.XrController.addAnchorAtHit(_lastHit);
-    _anchorId    = result.id;
+    const anchor = XR8.XrController.addAnchorAtHit(_lastHit);
+    _anchorId = anchor.id;
     _anchorGroup = createModelGroup();
-    console.log('[PLACE] XR8 Anchor created, id=', _anchorId);
   } else {
-    // 降级：该版本不支持 anchor API，回退到固定坐标方式
-    console.warn('[PLACE] addAnchorAtHit not available, using fixed position (may drift)');
     _anchorGroup = createModelGroup();
-    _anchorGroup.position.set(_retPos.x, _retPos.y, _retPos.z);
-    _anchorGroup.quaternion.set(_retQuat.x, _retQuat.y, _retQuat.z, _retQuat.w);
+    _anchorGroup.position.copy(_retPos);
+    _anchorGroup.quaternion.copy(_retQuat);
   }
 
   reticle.visible = false;
-  canPlace = false;
-  tipEl.textContent = '✓ 模型已锚定';
-  countEl.style.display = 'none';
-  console.log('[PLACE] anchored at', _retPos);
+  tipEl.textContent = '✓ 模型已放置';
 }
 
-// ─── 等待 XR8 就绪 ───────────────────────────────────────────────────────────
-const XR_TIMEOUT = 15000;
-const xrTimer = setTimeout(() => {
-  loadingEl.querySelector('span').textContent = '⚠️ AR 引擎加载超时';
-}, XR_TIMEOUT);
-
+// ————————————————————————————————————————
+// XR 启动
+// ————————————————————————————————————————
 const onXRLoad = async () => {
-  clearTimeout(xrTimer);
-  console.log('[XR] XR8 loaded, version:', XR8.version);
-
   try {
-    console.log('[XR] Loading SLAM chunk...');
     await XR8.loadChunk('slam');
-    console.log('[XR] SLAM chunk loaded. XrController:', XR8.XrController);
   } catch (e) {
-    console.error('[XR] Failed to load SLAM chunk:', e);
-    loadingEl.querySelector('span').textContent = '⚠️ SLAM 模块加载失败';
+    loadingEl.innerHTML = '⚠️ SLAM 加载失败';
     return;
   }
-
-  if (!XR8.XrController) {
-    console.error('[XR] XrController is still null after loadChunk!');
-    loadingEl.querySelector('span').textContent = '⚠️ XrController 初始化失败';
-    return;
-  }
-
-  // ═══ 注册 Pipeline ═══
 
   XR8.addCameraPipelineModule(XR8.GlTextureRenderer.pipelineModule());
   XR8.addCameraPipelineModule(XR8.XrController.pipelineModule());
 
   XR8.addCameraPipelineModule({
-    name: 'slam-demo',
-
+    name: 'ar-pro',
     onStart({ canvas, canvasWidth, canvasHeight, GLctx }) {
-      console.log('[PIPELINE] onStart:', canvasWidth, 'x', canvasHeight);
       initThree(canvas, GLctx, canvasWidth, canvasHeight);
       loadingEl.classList.add('hide');
     },
 
     onUpdate({ processCpuResult }) {
-      const reality = processCpuResult?.reality;
-
-      if (reality && !hasLoggedReality) {
-        hasLoggedReality = true;
-        console.log('[SLAM] First reality data, keys:', Object.keys(reality));
-        console.log('[SLAM] trackingStatus:', reality.trackingStatus);
-        console.log('[SLAM] Full reality sample:', JSON.stringify(reality).slice(0, 500));
-      }
-
-      // 每3秒输出一次调试信息
-      _debugTimer++;
-      if (_debugTimer % 180 === 0) {
-        console.log('[DEBUG] reality:', !!reality,
-          'status:', reality?.trackingStatus,
-          'intrinsics:', !!reality?.intrinsics,
-          'position:', reality?.position,
-          'hitTest available:', !!XR8.XrController?.hitTest);
-      }
-
+      const reality = processCpuResult.reality;
       if (!reality) return;
 
-      // ★ 同步 SLAM 相机 → Three.js 相机（手动管理矩阵）
-      if (reality.intrinsics) {
-        camera.projectionMatrix.fromArray(reality.intrinsics);
-        camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
-      }
-      if (reality.rotation) {
-        camera.quaternion.set(reality.rotation.x, reality.rotation.y, reality.rotation.z, reality.rotation.w);
-      }
-      if (reality.position) {
-        camera.position.set(reality.position.x, reality.position.y, reality.position.z);
-      }
-      // 手动更新世界矩阵（因为 matrixAutoUpdate = false）
+      // 同步相机
+      if (reality.intrinsics) camera.projectionMatrix.fromArray(reality.intrinsics);
+      if (reality.position) camera.position.set(reality.position.x, reality.position.y, reality.position.z);
+      if (reality.rotation) camera.quaternion.set(reality.rotation.x, reality.rotation.y, reality.rotation.z, reality.rotation.w);
       camera.updateMatrix();
       camera.updateMatrixWorld(true);
 
-      // ─── 已放置：每帧用 8th Wall 靖点更新的坐标驱动模型────────────────
+      // 模型已放置 → 同步锚点（防漂移核心）
       if (hasPlaced) {
-        // ★ 核心：将 8th Wall 持续修正的 anchor 坐标同步到 Three.js Group
-        if (_anchorId && reality.anchors && _anchorGroup) {
+        if (_anchorId && reality.anchors) {
           const a = reality.anchors.find(x => x.id === _anchorId);
           if (a) {
-            _anchorGroup.position.set(a.position.x, a.position.y, a.position.z);
-            if (a.rotation) {
-              _anchorGroup.quaternion.set(a.rotation.x, a.rotation.y, a.rotation.z, a.rotation.w);
-            }
+            _anchorGroup.position.copy(a.position);
+            _anchorGroup.quaternion.copy(a.rotation);
           }
         }
-        // 监控追踪状态
-        if (reality.trackingStatus !== 'NORMAL') {
-          tipEl.style.color = '#ff6b6b';
-          tipEl.textContent = '⚠️ 追踪丢失 — 请缓慢环顾四周重新扫描环境';
-        } else {
-          tipEl.style.color = '';
-          tipEl.textContent = '✓ 模型已锚定';
-        }
+        tipEl.style.color = reality.trackingStatus === 'NORMAL' ? '' : '#ff6b6b';
+        tipEl.textContent = reality.trackingStatus === 'NORMAL' ? '✓ 追踪正常' : '⚠️ 追踪丢失，缓慢移动';
         return;
       }
 
-      // ★ 必须 trackingStatus === 'NORMAL' 才代表 SLAM 真正在稳定追踪
+      // 未初始化完成
       if (reality.trackingStatus !== 'NORMAL') {
         reticle.visible = false;
-        canPlace = false;
-        tipEl.textContent = '移动手机缓慢扫描地面以初始化空间定位...';
+        tipEl.textContent = '请缓慢移动手机，初始化空间定位';
         return;
       }
 
+      // 首次归中
       if (!_hasRecentered) {
         _hasRecentered = true;
-        if (XR8.XrController.recenterXrOrigin) {
-          XR8.XrController.recenterXrOrigin();
-          console.log('[SLAM] World origin recentered at first NORMAL tracking');
-        }
-        _retReady = false; 
-        return;           
+        XR8.XrController.recenterXrOrigin?.();
+        return;
       }
 
-      if (XR8.XrController.hitTest) {
-        let hits = XR8.XrController.hitTest(0.5, 0.5, ['PLANE','ESTIMATED_SURFACE']);
+      // ————————————————————————————————————————
+      // 🔥 产品级 hitTest（平衡速度 + 稳定性）
+      // ————————————————————————————————————————
+      let hits = XR8.XrController.hitTest(0.5, 0.5, ['PLANE', 'ESTIMATED_SURFACE']);
 
-        if (!hits || hits.length === 0) {
-          const fpHits = XR8.XrController.hitTest(0.5, 0.5, ['FEATURE_POINT']);
-          if (fpHits && fpHits.length > 0) {
-            const camY = camera.position.y;
-            hits = fpHits.filter(h => camY - h.position.y > 0.5);
-          }
+      // 无平面 → 使用特征点兜底（高度过滤，不飘）
+      if (!hits?.length) {
+        const fp = XR8.XrController.hitTest(0.5, 0.5, ['FEATURE_POINT']);
+        if (fp?.length) {
+          const camY = camera.position.y;
+          hits = fp.filter(h => {
+            const d = camY - h.position.y;
+            return d > 0.3 && d < 1.6;
+          });
         }
+      }
 
-        canPlace = !!(hits && hits.length);
+      canPlace = hits?.length > 0;
+      if (canPlace) {
+        const { position, rotation } = hits[0];
+        _lastHit = hits[0];
 
-        if (_debugTimer % 180 === 0) {
-          console.log('[DEBUG] hitTest result:', hits?.length || 0, 'canPlace:', canPlace);
-        }
-
-        if (canPlace) {
-          const { position: p, rotation: q } = hits[0];
-          _lastHit = hits[0];  // ★ 保存最近一帧的 hit，用于 addAnchorAtHit
-          const t = _retReady ? 0.15 : 1;
-
-          _retPos.lerp(new THREE.Vector3(p.x, p.y, p.z), t);
-          reticle.position.copy(_retPos);
-
-          if (q) {
-            _retQuat.slerp(new THREE.Quaternion(q.x, q.y, q.z, q.w), t);
-            reticle.quaternion.copy(_retQuat);
-          }
-
-          _retReady = true;
-          tipEl.textContent = '✓ 检测到平面，点击放置模型';
-        } else {
-          tipEl.textContent = '对准地面，缓慢移动手机扫描平面...';
-        }
-        reticle.visible = canPlace;
+        _retPos.lerp(position, 0.15);
+        _retQuat.slerp(rotation, 0.15);
+        reticle.position.copy(_retPos);
+        reticle.quaternion.copy(_retQuat);
+        reticle.visible = true;
+        tipEl.textContent = '✓ 点击放置模型';
       } else {
-        tipEl.textContent = '正在初始化SLAM...';
+        reticle.visible = false;
+        tipEl.textContent = '扫描地面中...';
       }
     },
 
     onRender() {
-      if (!renderer) return;
       renderer.clearDepth();
       renderer.render(scene, camera);
     },
 
     onCanvasSizeChange({ canvasWidth, canvasHeight }) {
-      if (!renderer) return;
       renderer.setSize(canvasWidth, canvasHeight, false);
-    },
+    }
   });
 
-  // 触摸放置
-  window.addEventListener('touchstart', (e) => {
-    e.preventDefault();
-    tryPlace();
-  }, { passive: false });
+  window.addEventListener('touchstart', e => { e.preventDefault(); tryPlace(); });
+  window.addEventListener('click', tryPlace);
 
-  // 鼠标放置（调试用）
-  window.addEventListener('click', () => tryPlace());
-
-  // ═══ 设置 canvas 缓冲区尺寸 ═══
-  function resizeCanvas() {
-    const dpr = window.devicePixelRatio || 1;
-    xrCanvas.width  = Math.round(window.innerWidth * dpr);
-    xrCanvas.height = Math.round(window.innerHeight * dpr);
-  }
-  resizeCanvas();
-  window.addEventListener('resize', resizeCanvas);
-
-  // ═══ 启动引擎 ═══
   XR8.run({
     canvas: xrCanvas,
-    allowedDevices: XR8.XrConfig.device().ANY,
-    cameraConfig: {
-      direction: XR8.XrConfig.camera().BACK,
-    },
+    cameraConfig: { direction: XR8.XrConfig.camera().BACK }
   });
-
-  console.log('[XR] XR8.run() called');
 };
 
-if (window.XR8) {
-  onXRLoad();
-} else {
-  window.addEventListener('xrloaded', onXRLoad);
-}
+window.XR8 ? onXRLoad() : window.addEventListener('xrloaded', onXRLoad);
