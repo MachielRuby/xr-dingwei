@@ -14,7 +14,7 @@ const tipEl     = document.getElementById('tip');
 const countEl   = document.getElementById('count');
 const loadingEl = document.getElementById('loading');
 
-const MODEL_SCALE = 1.0;
+const MODEL_SCALE = 0.3;
 
 let scene, camera, renderer, reticle;
 let canPlace   = false;
@@ -150,6 +150,7 @@ function placeModel(pos, rot) {
   const anchor = new THREE.Group();
   anchor.position.set(pos.x, pos.y, pos.z);
   if (rot) anchor.quaternion.set(rot.x, rot.y, rot.z, rot.w);
+  model.setScalar(MODEL_SCALE);
   anchor.add(model);
   scene.add(anchor);
   _placedModel = model;
