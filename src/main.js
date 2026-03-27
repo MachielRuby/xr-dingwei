@@ -282,7 +282,7 @@ const onXRLoad = async () => {
       }
 
       if (XR8.XrController.hitTest) {
-        let hits = XR8.XrController.hitTest(0.5, 0.5, ['ESTIMATED_SURFACE']);
+        let hits = XR8.XrController.hitTest(0.5, 0.5, ['PLANE','ESTIMATED_SURFACE']);
 
         if (!hits || hits.length === 0) {
           const fpHits = XR8.XrController.hitTest(0.5, 0.5, ['FEATURE_POINT']);
