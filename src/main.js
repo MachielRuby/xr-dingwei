@@ -164,8 +164,6 @@ function tryPlace() {
   }
   hasPlaced = true;
 
-  // ★ 关键：用 8th Wall 原生 Anchor 系统创建锦点
-  // SLAM 每帧会修正锦点的世界坐标，模型跟着一起动，不会漂移
   if (XR8.XrController.addAnchorAtHit) {
     const result = XR8.XrController.addAnchorAtHit(_lastHit);
     _anchorId    = result.id;
