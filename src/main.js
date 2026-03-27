@@ -34,6 +34,15 @@ const _clock   = new THREE.Clock();
 const _mixers  = [];
 let _placedModel = null;
 
+// 命中测试采样点（屏幕归一化坐标），从常用中心到底部区域逐步尝试
+const HIT_TEST_POINTS = [
+  [0.5, 0.5],
+  [0.5, 0.62],
+  [0.5, 0.75],
+  [0.35, 0.65],
+  [0.65, 0.65],
+];
+
 // ─── 加载 GLB 模型 ───────────────────────────────────────────────────────────
 function loadModel() {
   const dracoLoader = new DRACOLoader();
@@ -206,6 +215,29 @@ function tryPlayAnimation(clientX, clientY) {
   console.log('[ANIM] Playing:', clip.name);
 }
 
+function getPlacementHit() {
+  const hitTest = XR8.XrController?.hitTest;
+  if (!hitTest) return null;
+
+  // 优先平面，找不到再退化到特征点，提升“扫半天没反应”场景下的可用性
+  const testModes = [
+    ['ESTIMATED_SURFACE'],
+    ['ESTIMATED_SURFACE', 'FEATURE_POINT'],
+    ['FEATURE_POINT'],
+  ];
+
+  for (const modes of testModes) {
+    for (const [x, y] of HIT_TEST_POINTS) {
+      const hits = hitTest(x, y, modes);
+      if (hits && hits.length) {
+        return { hit: hits[0], sample: [x, y], modes };
+      }
+    }
+  }
+
+  return null;
+}
+
 // ─── 等待 XR8 就绪 ───────────────────────────────────────────────────────────
 const XR_TIMEOUT = 15000;
 const xrTimer = setTimeout(() => {
@@ -287,15 +319,18 @@ const onXRLoad = async () => {
       if (hasPlaced) return;
 
       if (XR8.XrController.hitTest) {
-        const hits = XR8.XrController.hitTest(0.5, 0.5, ['ESTIMATED_SURFACE', 'FEATURE_POINT']);
-        canPlace = !!(hits && hits.length);
+        const placementResult = getPlacementHit();
+        canPlace = !!placementResult;
 
         if (_debugTimer % 180 === 0) {
-          console.log('[DEBUG] hitTest result:', hits?.length || 0, 'canPlace:', canPlace);
+          console.log('[DEBUG] hitTest result:', canPlace,
+            'sample:', placementResult?.sample,
+            'modes:', placementResult?.modes,
+            'trackingStatus:', reality?.trackingStatus);
         }
 
         if (canPlace) {
-          const { position: p, rotation: q } = hits[0];
+          const { position: p, rotation: q } = placementResult.hit;
           const t = _retReady ? 0.15 : 1;
 
           _retPos.lerp(new THREE.Vector3(p.x, p.y, p.z), t);
@@ -310,8 +345,8 @@ const onXRLoad = async () => {
           tipEl.textContent = '✓ 点击放置模型';
         } else {
           tipEl.textContent = reality.trackingStatus === 'NORMAL'
-            ? '对准平面...'
-            : '移动手机缓慢扫描地面...';
+            ? '继续缓慢移动，先对准地面/桌面边缘纹理...'
+            : `正在建图(${reality.trackingStatus || 'INIT'})，请缓慢扫地面...`;
         }
         reticle.visible = canPlace;
       } else {
