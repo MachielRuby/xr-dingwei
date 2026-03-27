@@ -13,8 +13,6 @@ const tipEl     = document.getElementById('tip');
 const countEl   = document.getElementById('count');
 const loadingEl = document.getElementById('loading');
 
-// ★ 模型缩放比例：GLB 默认 1单位=1m，Blender 以 cm 建模导出后需要 ×0.01 换算成米
-// 如果模型仍然太大/太小，调整这个值（0.01 = Blender cm, 0.001 = Blender mm, 1.0 = 已是米）
 const MODEL_SCALE = 1.0;
 
 let scene, camera, renderer, reticle;
