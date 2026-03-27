@@ -1,8 +1,9 @@
 /**
- * XR SLAM 空间定位
- * - 自动放置模型（首次 hitTest 成功即放）
- * - 手指拖拽可在空间中移动模型
- * - 松手后模型固定在世界坐标，SLAM 保持定位
+ * XR SLAM 空间定位 (终极稳定版)
+ * - 自动放置：首次识别地面 (hitTest) 成功即自动放置模型
+ * - 丝滑拖拽：引入 dragOffset 消除瞬间吸附的抖动；使用纯数学平面提升百倍性能
+ * - 视觉反馈：拖拽时显示防穿模的绿色锚点光环 (Reticle)
+ * - 交互反馈：点击模型播放内置动画
  */
 import * as THREE from 'three';
 import { GLTFLoader }    from 'three/examples/jsm/loaders/GLTFLoader.js';
@@ -18,9 +19,7 @@ const MODEL_SCALE = 0.25;
 
 let scene, camera, renderer;
 let hasPlaced  = false;
-let hasLoggedReality = false;
 let glbTemplate = null;
-let _debugTimer = 0;
 
 // 动画相关
 const _clock   = new THREE.Clock();
@@ -29,25 +28,28 @@ let _placedModel = null;
 let _placedAnchor = null;  // 模型的锚点 Group
 let placeCount = 0;
 
-// ─── 拖拽状态 ──────────────────────────────────────────────────────────────
+// ─── 拖拽与锚点光标相关 ──────────────────────────────────────────────────────
+let dragReticle = null;
+let dragPlane = new THREE.Plane(); // 隐形数学平面，用于丝滑拖拽
+let dragOffset = new THREE.Vector3(); // 记录手指按下时与模型中心的偏移量，防止瞬移抖动
+
+// ─── 触摸状态控制 ───────────────────────────────────────────────────────────
 let _isDragging  = false;
 let _touchStartX = 0;
 let _touchStartY = 0;
-const DRAG_THRESHOLD = 8; // px，区分点击和拖拽
+const DRAG_THRESHOLD = 8; // px，滑动超过此距离算作拖拽，否则算作点击
 let _dragConfirmed = false;
 
-// 命中测试采样点（屏幕归一化坐标），只取屏幕下半部分，让模型放在前方合理距离
+// 首次自动放置的检测采样点（屏幕归一化坐标）
 const HIT_TEST_POINTS = [
+  [0.5, 0.5],
+  [0.5, 0.62],
   [0.5, 0.75],
-  [0.5, 0.85],
-  [0.35, 0.78],
-  [0.65, 0.78],
-  [0.5, 0.68],
+  [0.35, 0.65],
+  [0.65, 0.65],
 ];
-// 自动放置时模型离相机的最小水平距离（米）
-const MIN_PLACE_DIST = 0.5;
 
-// ─── 加载 GLB 模型 ───────────────────────────────────────────────────────────
+// ─── 加载模型 ────────────────────────────────────────────────────────────────
 function loadModel() {
   const dracoLoader = new DRACOLoader();
   dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.6/');
@@ -60,34 +62,29 @@ function loadModel() {
     (gltf) => {
       glbTemplate = gltf.scene;
       glbTemplate.userData.animations = gltf.animations;
-      console.log('[MODEL] animations:', gltf.animations.length, gltf.animations.map(a => a.name));
+      console.log('[MODEL] animations:', gltf.animations.length);
 
       glbTemplate.scale.setScalar(MODEL_SCALE);
 
-      // 底面贴地：计算缩放后的包围盒，把底部对齐 y=0
+      // 计算包围盒，确保模型底部对齐 Y=0 平面
       const box  = new THREE.Box3().setFromObject(glbTemplate);
-      const size = box.getSize(new THREE.Vector3());
       glbTemplate.position.y = -box.min.y;
 
-      // 遍历所有 Mesh：DoubleSide 允许从内部看到面，关闭 frustumCulled 防止进入模型后消失
       glbTemplate.traverse(child => {
         if (child.isMesh) {
           child.castShadow    = true;
           child.receiveShadow = true;
-          child.frustumCulled = false;  // 在模型内部时不被视锥剔除
-          // 处理单材质和多材质数组
+          child.frustumCulled = false;  // 防止进入模型内部时消失
           const mats = Array.isArray(child.material) ? child.material : [child.material];
           mats.forEach(mat => {
             if (mat) {
-              mat.side = THREE.DoubleSide;  // 双面渲染，站在内部也能看见面
+              mat.side = THREE.DoubleSide; 
               mat.needsUpdate = true;
             }
           });
         }
       });
-
-      console.log('[MODEL] size(m):', size.x.toFixed(2), size.y.toFixed(2), size.z.toFixed(2),
-        '(scale =', MODEL_SCALE, ')  → 如模型太大/太小请调整顶部 MODEL_SCALE');
+      console.log('[MODEL] Loaded successfully.');
     },
     undefined,
     (err) => console.error('[MODEL] Failed to load 01.glb:', err)
@@ -107,7 +104,6 @@ function initThree(canvas, glContext, w, h) {
   });
   renderer.autoClear = false;
   renderer.setSize(w, h, false);
-  // PBR 必须项：正确的色彩空间 + 物理光照
   renderer.outputEncoding       = THREE.sRGBEncoding;
   renderer.physicallyCorrectLights = true;
 
@@ -120,19 +116,28 @@ function initThree(canvas, glContext, w, h) {
   fill.position.set(-5, 3, -4);
   scene.add(fill);
 
-  // 开始加载 GLB 模型
-  loadModel();
+  // 初始化拖拽光环 (Reticle)
+  const ringGeo = new THREE.RingGeometry(0.15, 0.2, 32);
+  ringGeo.rotateX(-Math.PI / 2); 
+  const ringMat = new THREE.MeshBasicMaterial({ 
+    color: 0x00ff00, 
+    transparent: true, 
+    opacity: 0.8
+    // 注意：不再使用 depthTest: false，改用拖拽时主动抬高 Y 轴来防止穿模
+  });
+  dragReticle = new THREE.Mesh(ringGeo, ringMat);
+  dragReticle.visible = false; 
+  scene.add(dragReticle);
 
-  console.log('[INIT] Three.js ready:', w, 'x', h);
+  loadModel();
 }
 
-// ─── 放置模型 ────────────────────────────────────────────────────────────────
+// ─── 放置模型 (仅首次自动触发) ───────────────────────────────────────────────
 function placeModel(pos, rot) {
   let model;
   if (glbTemplate) {
-    model = SkeletonUtils.clone(glbTemplate);  // 骨骼动画必须用 SkeletonUtils.clone
+    model = SkeletonUtils.clone(glbTemplate);
   } else {
-    // GLB 还没加载完，用临时方块
     model = new THREE.Mesh(
       new THREE.BoxGeometry(0.15, 0.15, 0.15),
       new THREE.MeshPhongMaterial({ color: 0x00e6c8 })
@@ -145,66 +150,52 @@ function placeModel(pos, rot) {
   if (rot) anchor.quaternion.set(rot.x, rot.y, rot.z, rot.w);
   anchor.add(model);
   scene.add(anchor);
+  
   _placedModel  = model;
   _placedAnchor = anchor;
+  
   if (glbTemplate?.userData.animations?.length) {
     const mixer = new THREE.AnimationMixer(model);
     _mixers.push(mixer);
-    console.log('[ANIM] Mixer created, animations:', glbTemplate.userData.animations.length);
   }
 
   placeCount++;
-  countEl.textContent = `已放置：${placeCount}`;
-  console.log('[PLACE]', pos);
+  if(countEl) countEl.textContent = `已放置：${placeCount}`;
 }
-function tryPlace() {
-  if (hasPlaced || !canPlace || !_retReady) {
-    console.log('[PLACE] skip: hasPlaced=', hasPlaced, 'canPlace=', canPlace, '_retReady=', _retReady);
-    return;
-  }
-  hasPlaced = true;  // ★ 立即锁定，禁止再次放置
 
-  // 直接取瞄准环的世界坐标放置
-  placeModel(
-    { x: _retPos.x, y: _retPos.y, z: _retPos.z },
-    { x: _retQuat.x, y: _retQuat.y, z: _retQuat.z, w: _retQuat.w }
+// ─── 获取准确的标准化设备坐标 (NDC) ──────────────────────────────────────────
+function getNormalizedDeviceCoordinates(clientX, clientY) {
+  const rect = xrCanvas.getBoundingClientRect();
+  return new THREE.Vector2(
+    ((clientX - rect.left) / rect.width) * 2 - 1,
+    -((clientY - rect.top) / rect.height) * 2 + 1
   );
-
-  // 放置后：隐藏瞄准环、更新提示
-  reticle.visible = false;
-  canPlace = false;
-  tipEl.textContent = '✓ 模型已锚定';
-  countEl.style.display = 'none';
-  console.log('[PLACE] Model anchored at', _retPos);
 }
 
-// ─── 点击已放置的模型播放动画 ─────────────────────────────────────────────────
+// ─── 点击模型播放动画 ─────────────────────────────────────────────────────────
 function tryPlayAnimation(clientX, clientY) {
   if (!_placedModel || !_mixers.length || !glbTemplate?.userData.animations?.length) return;
 
-  // 射线检测是否点中模型
-  const ndcX = (clientX / window.innerWidth)  *  2 - 1;
-  const ndcY = (clientY / window.innerHeight) * -2 + 1;
-  const ray  = new THREE.Raycaster();
-  ray.setFromCamera(new THREE.Vector2(ndcX, ndcY), camera);
-  if (!ray.intersectObject(_placedModel, true).length) return;
+  const mouse = getNormalizedDeviceCoordinates(clientX, clientY);
+  const raycaster  = new THREE.Raycaster();
+  raycaster.setFromCamera(mouse, camera);
+  
+  if (!raycaster.intersectObject(_placedModel, true).length) return;
 
-  // 重置并播放第一个动画（循环）
   const mixer  = _mixers[0];
   const clip   = glbTemplate.userData.animations[0];
   const action = mixer.clipAction(clip);
   action.reset();
   action.loop = THREE.LoopRepeat;
   action.play();
-  tipEl.textContent = '▶ 动画播放中';
-  console.log('[ANIM] Playing:', clip.name);
+  if(tipEl) tipEl.textContent = '▶ 动画播放中';
 }
 
+// ─── 查找可放置的平面 ─────────────────────────────────────────────────────────
 function getPlacementHit() {
   const hitTest = XR8.XrController?.hitTest;
   if (!hitTest) return null;
 
-  // 优先平面，找不到再退化到特征点，提升“扫半天没反应”场景下的可用性
   const testModes = [
     ['ESTIMATED_SURFACE'],
     ['ESTIMATED_SURFACE', 'FEATURE_POINT'],
@@ -214,98 +205,61 @@ function getPlacementHit() {
   for (const modes of testModes) {
     for (const [x, y] of HIT_TEST_POINTS) {
       const hits = hitTest(x, y, modes);
-      if (hits && hits.length) {
-        return { hit: hits[0], sample: [x, y], modes };
-      }
+      if (hits && hits.length) return hits[0];
     }
   }
-
   return null;
 }
 
-// ─── 拖拽：将模型锚点移到触摸点的 hitTest 位置 ──────────────────────────────
-function moveModelToTouch(clientX, clientY) {
-  if (!_placedAnchor || !XR8.XrController?.hitTest) return;
+// ─── 核心：带 Offset 的丝滑拖拽 ───────────────────────────────────────────────
+function moveModelSmoothly(clientX, clientY) {
+  if (!_placedAnchor || !dragReticle) return;
 
-  const nx = clientX / window.innerWidth;
-  const ny = clientY / window.innerHeight;
+  const mouse = getNormalizedDeviceCoordinates(clientX, clientY);
+  const raycaster = new THREE.Raycaster();
+  raycaster.setFromCamera(mouse, camera);
 
-  const testModes = [
-    ['ESTIMATED_SURFACE'],
-    ['ESTIMATED_SURFACE', 'FEATURE_POINT'],
-    ['FEATURE_POINT'],
-  ];
+  const intersectPoint = new THREE.Vector3();
+  raycaster.ray.intersectPlane(dragPlane, intersectPoint);
 
-  for (const modes of testModes) {
-    const hits = XR8.XrController.hitTest(nx, ny, modes);
-    if (hits && hits.length) {
-      const h = hits[0];
-      _placedAnchor.position.set(h.position.x, h.position.y, h.position.z);
-      return;
-    }
+  if (intersectPoint) {
+    // 补回按下瞬间计算出的偏移量，彻底消除“瞬间闪现”的抖动
+    const targetPos = intersectPoint.clone().add(dragOffset);
+    _placedAnchor.position.copy(targetPos);
+    
+    // 光环跟随模型中心，并主动抬高 1cm，防止与现实地面穿模不可见
+    dragReticle.position.copy(targetPos);
+    dragReticle.position.y += 0.01; 
   }
 }
 
-// ─── 等待 XR8 就绪 ───────────────────────────────────────────────────────────
+// ─── 8th Wall 启动与事件绑定 ─────────────────────────────────────────────────
 const XR_TIMEOUT = 15000;
 const xrTimer = setTimeout(() => {
-  loadingEl.querySelector('span').textContent = '⚠️ AR 引擎加载超时';
+  if(loadingEl) loadingEl.querySelector('span').textContent = '⚠️ AR 引擎加载超时';
 }, XR_TIMEOUT);
 
 const onXRLoad = async () => {
   clearTimeout(xrTimer);
-  console.log('[XR] XR8 loaded, version:', XR8.version);
 
   try {
-    console.log('[XR] Loading SLAM chunk...');
     await XR8.loadChunk('slam');
-    console.log('[XR] SLAM chunk loaded. XrController:', XR8.XrController);
   } catch (e) {
-    console.error('[XR] Failed to load SLAM chunk:', e);
-    loadingEl.querySelector('span').textContent = '⚠️ SLAM 模块加载失败';
+    if(loadingEl) loadingEl.querySelector('span').textContent = '⚠️ SLAM 模块加载失败';
     return;
   }
-
-  if (!XR8.XrController) {
-    console.error('[XR] XrController is still null after loadChunk!');
-    loadingEl.querySelector('span').textContent = '⚠️ XrController 初始化失败';
-    return;
-  }
-
-  // ═══ 注册 Pipeline ═══
 
   XR8.addCameraPipelineModule(XR8.GlTextureRenderer.pipelineModule());
   XR8.addCameraPipelineModule(XR8.XrController.pipelineModule());
 
   XR8.addCameraPipelineModule({
     name: 'slam-demo',
-
     onStart({ canvas, canvasWidth, canvasHeight, GLctx }) {
-      console.log('[PIPELINE] onStart:', canvasWidth, 'x', canvasHeight);
       initThree(canvas, GLctx, canvasWidth, canvasHeight);
-      loadingEl.classList.add('hide');
+      if(loadingEl) loadingEl.classList.add('hide');
     },
-
     onUpdate({ processCpuResult }) {
       const reality = processCpuResult?.reality;
-
-      if (reality && !hasLoggedReality) {
-        hasLoggedReality = true;
-        console.log('[SLAM] First reality data, keys:', Object.keys(reality));
-        console.log('[SLAM] trackingStatus:', reality.trackingStatus);
-        console.log('[SLAM] Full reality sample:', JSON.stringify(reality).slice(0, 500));
-      }
-
-      // 每3秒输出一次调试信息
-      _debugTimer++;
-      if (_debugTimer % 180 === 0) {
-        console.log('[DEBUG] reality:', !!reality,
-          'status:', reality?.trackingStatus,
-          'intrinsics:', !!reality?.intrinsics,
-          'position:', reality?.position,
-          'hitTest available:', !!XR8.XrController?.hitTest);
-      }
-
       if (!reality) return;
 
       if (reality.intrinsics) {
@@ -321,50 +275,66 @@ const onXRLoad = async () => {
       camera.updateMatrix();
       camera.updateMatrixWorld(true);
 
-      const delta = _clock.getDelta();
-      if (_mixers.length) _mixers.forEach(m => m.update(delta));
+      if (_mixers.length) {
+        const delta = _clock.getDelta();
+        _mixers.forEach(m => m.update(delta));
+      }
 
-      // ─ 自动放置：首次 hitTest 成功 + 模型已加载 → 立即放 ─
+      // 首次识别地面并自动放置
       if (!hasPlaced && glbTemplate && XR8.XrController.hitTest) {
-        const result = getPlacementHit();
-        const hit = result?.hit;
+        const hit = getPlacementHit();
         if (hit) {
           hasPlaced = true;
           placeModel(
             { x: hit.position.x, y: hit.position.y, z: hit.position.z },
             hit.rotation ? { x: hit.rotation.x, y: hit.rotation.y, z: hit.rotation.z, w: hit.rotation.w } : null
           );
-          tipEl.textContent = '✓ 模型已放置，拖拽可移动';
-          countEl.style.display = 'none';
-        } else {
+          if(tipEl) tipEl.textContent = '✓ 模型已放置，长按拖拽可移动';
+          if(countEl) countEl.style.display = 'none';
+        } else if (tipEl) {
           tipEl.textContent = reality.trackingStatus === 'NORMAL'
             ? '对准地面，即将自动放置...'
-            : `正在建图(${reality.trackingStatus || 'INIT'})，请缓慢扫地面...`;
+            : `正在建图(${reality.trackingStatus || 'INIT'})，请缓慢移动...`;
         }
       }
     },
-
     onRender() {
       if (!renderer) return;
       renderer.clearDepth();
       renderer.render(scene, camera);
     },
-
     onCanvasSizeChange({ canvasWidth, canvasHeight }) {
       if (!renderer) return;
       renderer.setSize(canvasWidth, canvasHeight, false);
     },
   });
 
-  // ─── 触摸事件：拖拽移动 + 点击播放动画 ─────────────────────────────────────
+  // ─── 触摸事件监听 ──────────────────────────────────────────────────────────
   window.addEventListener('touchstart', (e) => {
     e.preventDefault();
-    if (!hasPlaced) return;
+    if (!hasPlaced || !_placedAnchor) return;
     const t = e.touches[0];
     _isDragging    = true;
     _dragConfirmed = false;
     _touchStartX   = t.clientX;
     _touchStartY   = t.clientY;
+
+    // 1. 根据模型当前高度，定义拖拽用隐形平面
+    const upVector = new THREE.Vector3(0, 1, 0);
+    dragPlane.setFromNormalAndCoplanarPoint(upVector, _placedAnchor.position);
+
+    // 2. 计算 Offset 偏移量，防止拖拽瞬间模型瞬移到手指正下方
+    const mouse = getNormalizedDeviceCoordinates(t.clientX, t.clientY);
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(mouse, camera);
+    const hitPoint = new THREE.Vector3();
+    raycaster.ray.intersectPlane(dragPlane, hitPoint);
+    
+    if (hitPoint) {
+      dragOffset.copy(_placedAnchor.position).sub(hitPoint);
+    } else {
+      dragOffset.set(0, 0, 0);
+    }
   }, { passive: false });
 
   window.addEventListener('touchmove', (e) => {
@@ -372,36 +342,33 @@ const onXRLoad = async () => {
     if (!_isDragging || !hasPlaced) return;
     const t = e.touches[0];
 
+    // 判断是点击还是拖拽
     if (!_dragConfirmed) {
       const dx = t.clientX - _touchStartX;
       const dy = t.clientY - _touchStartY;
       if (Math.sqrt(dx * dx + dy * dy) < DRAG_THRESHOLD) return;
+      
       _dragConfirmed = true;
-      tipEl.textContent = '拖拽中...';
+      if (dragReticle) dragReticle.visible = true; // 确认拖拽，显示绿色光环
+      if (tipEl) tipEl.textContent = '拖拽移动中...';
     }
 
-    moveModelToTouch(t.clientX, t.clientY);
+    moveModelSmoothly(t.clientX, t.clientY);
   }, { passive: false });
 
   window.addEventListener('touchend', () => {
     if (!_isDragging) return;
 
     if (_dragConfirmed) {
-      tipEl.textContent = '✓ 模型已固定，拖拽可移动';
-      console.log('[DRAG] Model repositioned to',
-        _placedAnchor?.position.x.toFixed(3),
-        _placedAnchor?.position.y.toFixed(3),
-        _placedAnchor?.position.z.toFixed(3));
+      if (tipEl) tipEl.textContent = '✓ 模型位置已更新';
+      if (dragReticle) dragReticle.visible = false; // 拖拽结束，隐藏光环
     } else {
+      // 未达到拖拽阈值，视为点击，尝试播放动画
       tryPlayAnimation(_touchStartX, _touchStartY);
     }
 
     _isDragging    = false;
     _dragConfirmed = false;
-  });
-
-  window.addEventListener('click', (e) => {
-    if (hasPlaced) tryPlayAnimation(e.clientX, e.clientY);
   });
 
   function resizeCanvas() {
@@ -412,16 +379,11 @@ const onXRLoad = async () => {
   resizeCanvas();
   window.addEventListener('resize', resizeCanvas);
 
-  // ═══ 启动引擎 ═══
   XR8.run({
     canvas: xrCanvas,
     allowedDevices: XR8.XrConfig.device().ANY,
-    cameraConfig: {
-      direction: XR8.XrConfig.camera().BACK,
-    },
+    cameraConfig: { direction: XR8.XrConfig.camera().BACK },
   });
-
-  console.log('[XR] XR8.run() called');
 };
 
 if (window.XR8) {
