@@ -107,11 +107,14 @@ function initThree(canvas, glContext, w, h) {
   renderer.outputEncoding       = THREE.sRGBEncoding;
   renderer.physicallyCorrectLights = true;
 
+  // 半球光（天空蓝 + 地面暖色）— PBR 材质的基础环境光
   const hemi = new THREE.HemisphereLight(0xddeeff, 0x806040, 2.5);
   scene.add(hemi);
+  // 主方向光（模拟太阳）
   const sun = new THREE.DirectionalLight(0xffffff, 3.0);
   sun.position.set(5, 10, 7);
   scene.add(sun);
+  // 补光（防止背面全黑）
   const fill = new THREE.DirectionalLight(0xffffff, 0.8);
   fill.position.set(-5, 3, -4);
   scene.add(fill);
@@ -152,7 +155,11 @@ function placeModel(pos, rot) {
   if (rot) anchor.quaternion.set(rot.x, rot.y, rot.z, rot.w);
   anchor.add(model);
   scene.add(anchor);
+
+  // 保存已放置的模型引用，用于点击触发动画
   _placedModel = model;
+
+  // 若模型有动画，创建 Mixer（先不播放，等点击触发）
   if (glbTemplate?.userData.animations?.length) {
     const mixer = new THREE.AnimationMixer(model);
     _mixers.push(mixer);
@@ -163,6 +170,8 @@ function placeModel(pos, rot) {
   countEl.textContent = `已放置：${placeCount}`;
   console.log('[PLACE]', pos);
 }
+
+// ─── 触摸/点击放置（直接用瞄准环坐标，不重新做 hitTest）────────────────────
 function tryPlace() {
   if (hasPlaced || !canPlace || !_retReady) {
     console.log('[PLACE] skip: hasPlaced=', hasPlaced, 'canPlace=', canPlace, '_retReady=', _retReady);
