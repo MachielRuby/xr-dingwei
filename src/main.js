@@ -20,11 +20,16 @@ const MODEL_SCALE = 1.0;
 let scene, camera, renderer, reticle;
 let canPlace       = false;
 let hasPlaced      = false;   // ★ 只允许放置一次
-let _hasRecentered = false;   // ★ SLAM 首次进入 NORMAL 时重置坐标原点（只做一次）
-let placeCount = 0;
-let hasLoggedReality = false;
+let _hasRecentered = false;   // SLAM 首次进入 NORMAL 时重置坐标原点
 let glbTemplate = null;
 let _debugTimer = 0;
+let hasLoggedReality = false;
+let placeCount = 0;
+
+// ★ Anchor 系统：用 8th Wall 原生锦点持续修正位置，避免漂移
+let _anchorId    = null;   // addAnchorAtHit 返回的 id
+let _anchorGroup = null;   // 模型所在的 Three.js Group
+let _lastHit     = null;   // 最近一帧的 hitTest 结果（用于创建 anchor）
 
 // 瞄准环平滑插值
 const _retPos  = new THREE.Vector3();
@@ -151,26 +156,34 @@ function placeModel(pos, rot) {
   console.log('[PLACE]', pos);
 }
 
-// ─── 触摸/点击放置（直接用瞄准环坐标，不重新做 hitTest）────────────────────
+// ─── 触摸/点击放置───────────────────────────────────────────────────────
 function tryPlace() {
-  if (hasPlaced || !canPlace || !_retReady) {
+  if (hasPlaced || !canPlace || !_retReady || !_lastHit) {
     console.log('[PLACE] skip: hasPlaced=', hasPlaced, 'canPlace=', canPlace, '_retReady=', _retReady);
     return;
   }
-  hasPlaced = true;  // ★ 立即锁定，禁止再次放置
+  hasPlaced = true;
 
-  // 直接取瞄准环的世界坐标放置
-  placeModel(
-    { x: _retPos.x, y: _retPos.y, z: _retPos.z },
-    { x: _retQuat.x, y: _retQuat.y, z: _retQuat.z, w: _retQuat.w }
-  );
+  // ★ 关键：用 8th Wall 原生 Anchor 系统创建锦点
+  // SLAM 每帧会修正锦点的世界坐标，模型跟着一起动，不会漂移
+  if (XR8.XrController.addAnchorAtHit) {
+    const result = XR8.XrController.addAnchorAtHit(_lastHit);
+    _anchorId    = result.id;
+    _anchorGroup = createModelGroup();
+    console.log('[PLACE] XR8 Anchor created, id=', _anchorId);
+  } else {
+    // 降级：该版本不支持 anchor API，回退到固定坐标方式
+    console.warn('[PLACE] addAnchorAtHit not available, using fixed position (may drift)');
+    _anchorGroup = createModelGroup();
+    _anchorGroup.position.set(_retPos.x, _retPos.y, _retPos.z);
+    _anchorGroup.quaternion.set(_retQuat.x, _retQuat.y, _retQuat.z, _retQuat.w);
+  }
 
-  // 放置后：隐藏瞄准环、更新提示
   reticle.visible = false;
   canPlace = false;
   tipEl.textContent = '✓ 模型已锚定';
   countEl.style.display = 'none';
-  console.log('[PLACE] Model anchored at', _retPos);
+  console.log('[PLACE] anchored at', _retPos);
 }
 
 // ─── 等待 XR8 就绪 ───────────────────────────────────────────────────────────
@@ -250,10 +263,20 @@ const onXRLoad = async () => {
       camera.updateMatrix();
       camera.updateMatrixWorld(true);
 
-      // ─── 已放置：持续监控追踪状态，漂移时给用户实时提示 ───────────────
+      // ─── 已放置：每帧用 8th Wall 靖点更新的坐标驱动模型────────────────
       if (hasPlaced) {
+        // ★ 核心：将 8th Wall 持续修正的 anchor 坐标同步到 Three.js Group
+        if (_anchorId && reality.anchors && _anchorGroup) {
+          const a = reality.anchors.find(x => x.id === _anchorId);
+          if (a) {
+            _anchorGroup.position.set(a.position.x, a.position.y, a.position.z);
+            if (a.rotation) {
+              _anchorGroup.quaternion.set(a.rotation.x, a.rotation.y, a.rotation.z, a.rotation.w);
+            }
+          }
+        }
+        // 监控追踪状态
         if (reality.trackingStatus !== 'NORMAL') {
-          // 追踪丢失 = 模型必然漂移，立刻告警
           tipEl.style.color = '#ff6b6b';
           tipEl.textContent = '⚠️ 追踪丢失 — 请缓慢环顾四周重新扫描环境';
         } else {
@@ -300,6 +323,7 @@ const onXRLoad = async () => {
 
         if (canPlace) {
           const { position: p, rotation: q } = hits[0];
+          _lastHit = hits[0];  // ★ 保存最近一帧的 hit，用于 addAnchorAtHit
           const t = _retReady ? 0.15 : 1;
 
           _retPos.lerp(new THREE.Vector3(p.x, p.y, p.z), t);
