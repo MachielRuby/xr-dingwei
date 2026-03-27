@@ -43,6 +43,48 @@
         animation: spin .8s linear infinite;
       }
       @keyframes spin { to { transform: rotate(360deg); } }
+
+      /* ── 虚拟摇杆（左下角 XZ 平面移动） ── */
+      #joystick-wrap {
+        display: none;
+        position: fixed; bottom: 30px; left: 24px;
+        z-index: 20;
+      }
+      #joystick-wrap.visible { display: block; }
+      #joystick-zone {
+        width: 120px; height: 120px;
+        background: rgba(255,255,255,.12);
+        border: 2px solid rgba(255,255,255,.35);
+        border-radius: 50%;
+        position: relative;
+        touch-action: none;
+      }
+      #joystick-knob {
+        width: 44px; height: 44px;
+        background: rgba(0,230,200,.85);
+        border-radius: 50%;
+        position: absolute;
+        top: 50%; left: 50%;
+        transform: translate(-50%, -50%);
+        pointer-events: none;
+      }
+      /* ── 上下按钮（右下角 Y 轴移动） ── */
+      #vertical-btns {
+        display: none;
+        position: fixed; bottom: 30px; right: 24px;
+        z-index: 20;
+        flex-direction: column; gap: 12px;
+      }
+      #vertical-btns.visible { display: flex; }
+      .v-btn {
+        width: 52px; height: 52px;
+        background: rgba(255,255,255,.18);
+        border: 2px solid rgba(255,255,255,.45);
+        border-radius: 50%;
+        color: #fff; font-size: 22px;
+        display: flex; align-items: center; justify-content: center;
+        touch-action: none; user-select: none;
+      }
     </style>
   </head>
   <body>
@@ -51,6 +93,16 @@
     <div id="loading"><div class="spinner"></div><span>正在初始化摄像头...</span></div>
     <div id="tip">移动手机扫描地面...</div>
     <div id="count">已放置: 0</div>
+
+    <!-- 虚拟摇杆（左下角 XZ 移动） -->
+    <div id="joystick-wrap">
+      <div id="joystick-zone"><div id="joystick-knob"></div></div>
+    </div>
+    <!-- 上下移动按钮（右下角） -->
+    <div id="vertical-btns">
+      <div class="v-btn" id="btn-up">↑</div>
+      <div class="v-btn" id="btn-down">↓</div>
+    </div>
 
     <script src="/xr-standalone/xr.js"></script>
     <script type="module" src="/src/main.js"></script>

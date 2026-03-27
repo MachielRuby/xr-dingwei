@@ -28,6 +28,13 @@ let _placedModel = null;
 let _placedAnchor = null;  // 模型的锚点 Group
 let placeCount = 0;
 
+// ─── 摇杆状态 ────────────────────────────────────────────────────────────────
+const JOYSTICK_RADIUS = 50;   // px，摇杆旋钮最大偏移半径
+const MOVE_SPEED      = 1.5;  // m/s，XZ 平面移动速度（相机朝向相对）
+const VERT_SPEED      = 0.8;  // m/s，Y 轴上下移动速度
+const _joystick = { active: false, touchId: null, zoneX: 0, zoneY: 0, dx: 0, dy: 0 };
+const _vertMove  = { up: false, down: false };
+
 // ─── 拖拽与锚点光标相关 ──────────────────────────────────────────────────────
 let dragReticle = null;
 let dragPlane = new THREE.Plane(); // 隐形数学平面，用于丝滑拖拽
@@ -161,6 +168,10 @@ function placeModel(pos, rot) {
 
   placeCount++;
   if(countEl) countEl.textContent = `已放置：${placeCount}`;
+
+  // 模型放置后显示摇杆 UI
+  document.getElementById('joystick-wrap')?.classList.add('visible');
+  document.getElementById('vertical-btns')?.classList.add('visible');
 }
 
 // ─── 获取准确的标准化设备坐标 (NDC) ──────────────────────────────────────────
@@ -233,6 +244,28 @@ function moveModelSmoothly(clientX, clientY) {
   }
 }
 
+// ─── 每帧根据摇杆状态移动模型 ────────────────────────────────────────────────
+function applyJoystickMovement(delta) {
+  if (!_placedAnchor) return;
+  const movingXZ = _joystick.active && (_joystick.dx !== 0 || _joystick.dy !== 0);
+  if (!movingXZ && !_vertMove.up && !_vertMove.down) return;
+
+  // 以相机水平朝向为基准，分解出前进方向和右方向（去除竖直分量）
+  const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+  forward.y = 0; forward.normalize();
+  const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+  right.y = 0; right.normalize();
+
+  if (movingXZ) {
+    const nx =  _joystick.dx / JOYSTICK_RADIUS; // -1~1，向右为正
+    const ny =  _joystick.dy / JOYSTICK_RADIUS; // -1~1，向下为正
+    _placedAnchor.position.addScaledVector(right,   nx * MOVE_SPEED * delta);
+    _placedAnchor.position.addScaledVector(forward, -ny * MOVE_SPEED * delta); // 推杆向上 = 前进
+  }
+  if (_vertMove.up)   _placedAnchor.position.y += VERT_SPEED * delta;
+  if (_vertMove.down) _placedAnchor.position.y -= VERT_SPEED * delta;
+}
+
 // ─── 8th Wall 启动与事件绑定 ─────────────────────────────────────────────────
 const XR_TIMEOUT = 15000;
 const xrTimer = setTimeout(() => {
@@ -275,10 +308,9 @@ const onXRLoad = async () => {
       camera.updateMatrix();
       camera.updateMatrixWorld(true);
 
-      if (_mixers.length) {
-        const delta = _clock.getDelta();
-        _mixers.forEach(m => m.update(delta));
-      }
+      const delta = _clock.getDelta();
+      if (_mixers.length) _mixers.forEach(m => m.update(delta));
+      applyJoystickMovement(delta);
 
       // 首次识别地面并自动放置
       if (!hasPlaced && glbTemplate && XR8.XrController.hitTest) {
@@ -370,6 +402,70 @@ const onXRLoad = async () => {
     _isDragging    = false;
     _dragConfirmed = false;
   });
+
+  // ─── 虚拟摇杆事件（左下角，控制 XZ 平面移动） ─────────────────────────────
+  const joystickZone = document.getElementById('joystick-zone');
+  const joystickKnob = document.getElementById('joystick-knob');
+  if (joystickZone) {
+    joystickZone.addEventListener('touchstart', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      if (_joystick.active) return;
+      const t = e.changedTouches[0];
+      const rect = joystickZone.getBoundingClientRect();
+      _joystick.active  = true;
+      _joystick.touchId = t.identifier;
+      _joystick.zoneX   = rect.left + rect.width  / 2;
+      _joystick.zoneY   = rect.top  + rect.height / 2;
+      _joystick.dx = 0;
+      _joystick.dy = 0;
+    }, { passive: false });
+
+    joystickZone.addEventListener('touchmove', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      for (const t of e.changedTouches) {
+        if (t.identifier !== _joystick.touchId) continue;
+        let dx = t.clientX - _joystick.zoneX;
+        let dy = t.clientY - _joystick.zoneY;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist > JOYSTICK_RADIUS) { dx *= JOYSTICK_RADIUS / dist; dy *= JOYSTICK_RADIUS / dist; }
+        _joystick.dx = dx;
+        _joystick.dy = dy;
+        if (joystickKnob) {
+          joystickKnob.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))`;
+        }
+      }
+    }, { passive: false });
+
+    const resetJoystick = (e) => {
+      e.preventDefault(); e.stopPropagation();
+      for (const t of e.changedTouches) {
+        if (t.identifier !== _joystick.touchId) continue;
+        _joystick.active = false; _joystick.touchId = null;
+        _joystick.dx = 0; _joystick.dy = 0;
+        if (joystickKnob) joystickKnob.style.transform = 'translate(-50%, -50%)';
+      }
+    };
+    joystickZone.addEventListener('touchend',    resetJoystick, { passive: false });
+    joystickZone.addEventListener('touchcancel', resetJoystick, { passive: false });
+  }
+
+  // ─── 上下按钮（右下角，控制 Y 轴移动） ────────────────────────────────────
+  const btnUp   = document.getElementById('btn-up');
+  const btnDown = document.getElementById('btn-down');
+  [btnUp, btnDown].forEach(btn => {
+    // 阻止 touchstart 冒泡，防止意外触发窗口的拖拽逻辑
+    btn?.addEventListener('touchstart', (e) => { e.preventDefault(); e.stopPropagation(); }, { passive: false });
+  });
+  if (btnUp) {
+    btnUp.addEventListener('pointerdown',  () => { _vertMove.up = true;  });
+    btnUp.addEventListener('pointerup',    () => { _vertMove.up = false; });
+    btnUp.addEventListener('pointerleave', () => { _vertMove.up = false; });
+  }
+  if (btnDown) {
+    btnDown.addEventListener('pointerdown',  () => { _vertMove.down = true;  });
+    btnDown.addEventListener('pointerup',    () => { _vertMove.down = false; });
+    btnDown.addEventListener('pointerleave', () => { _vertMove.down = false; });
+  }
 
   function resizeCanvas() {
     const dpr = window.devicePixelRatio || 1;
