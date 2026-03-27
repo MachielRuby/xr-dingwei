@@ -14,7 +14,7 @@ const tipEl     = document.getElementById('tip');
 const countEl   = document.getElementById('count');
 const loadingEl = document.getElementById('loading');
 
-const MODEL_SCALE = 0.25;
+const MODEL_SCALE = 0.3;
 
 let scene, camera, renderer;
 let hasPlaced  = false;
@@ -239,9 +239,6 @@ function moveModelToTouch(clientX, clientY) {
     if (hits && hits.length) {
       const h = hits[0];
       _placedAnchor.position.set(h.position.x, h.position.y, h.position.z);
-      if (h.rotation) {
-        _placedAnchor.quaternion.set(h.rotation.x, h.rotation.y, h.rotation.z, h.rotation.w);
-      }
       return;
     }
   }
